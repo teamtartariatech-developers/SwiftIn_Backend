@@ -1,0 +1,788 @@
+const express = require('express');
+const bodyParser = require('body-parser');
+const router = express.Router();
+const emailService = require('../../services/emailService');
+const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+
+router.use(bodyParser.json());
+router.use(authenticate);
+router.use(requireModuleAccess('guest-management'));
+
+const getModel = (req, name) => req.tenant.models[name];
+const getPropertyId = (req) => req.tenant.property._id;
+
+// ========== CONVERSATIONS ==========
+
+// Get all conversations with pagination and filters
+router.get('/conversations', async (req, res) => {
+    try {
+        const { page = 1, limit = 20, status = 'open', search = '', assignedTo = '' } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const propertyId = getPropertyId(req);
+        const Conversation = getModel(req, 'Conversation');
+
+        const query = { property: propertyId };
+        
+        if (status) {
+            query.status = status;
+        }
+        
+        if (assignedTo) {
+            query.assignedTo = assignedTo;
+        }
+        
+        if (search && search.trim() !== '') {
+            query.$or = [
+                { guestName: { $regex: search, $options: 'i' } },
+                { guestEmail: { $regex: search, $options: 'i' } },
+                { roomNumber: { $regex: search, $options: 'i' } }
+            ];
+        }
+        
+        const total = await Conversation.countDocuments(query);
+        
+        const conversations = await Conversation.find(query)
+            .skip(skip)
+            .limit(parseInt(limit))
+            .sort({ lastMessageAt: -1 })
+            .populate('guestId', 'guestName guestEmail guestNumber')
+            .populate('reservationId', 'confirmationNumber');
+        
+        res.status(200).json({
+            conversations,
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(total / parseInt(limit)),
+                totalItems: total,
+                itemsPerPage: parseInt(limit)
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching conversations:', error);
+        res.status(500).json({ message: "Server error fetching conversations." });
+    }
+});
+
+// Get single conversation with messages
+router.get('/conversations/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const Conversation = getModel(req, 'Conversation');
+        const Message = getModel(req, 'Message');
+
+        const conversation = await Conversation.findOne({ _id: id, property: propertyId })
+            .populate('guestId', 'guestName guestEmail guestNumber guestType')
+            .populate('reservationId');
+        
+        if (!conversation) {
+            return res.status(404).json({ message: "Conversation not found" });
+        }
+        
+        const messages = await Message.find({ conversationId: id, property: propertyId })
+            .sort({ createdAt: 1 });
+        
+        res.status(200).json({
+            conversation,
+            messages
+        });
+    } catch (error) {
+        console.error('Error fetching conversation:', error);
+        res.status(500).json({ message: "Server error fetching conversation." });
+    }
+});
+
+// Create new conversation
+router.post('/conversations', async (req, res) => {
+    try {
+        const { guestId, guestName, guestEmail, guestPhone, reservationId, roomNumber, assignedTo, assignedToName, notes } = req.body;
+        const propertyId = getPropertyId(req);
+        const Conversation = getModel(req, 'Conversation');
+        
+        // Check if conversation already exists for this guest and reservation
+        let conversation = await Conversation.findOne({
+            guestId,
+            reservationId: reservationId || null,
+            status: { $in: ['open', 'closed'] },
+            property: propertyId
+        });
+        
+        if (conversation) {
+            // Update existing conversation
+            conversation.status = 'open';
+            if (assignedTo) conversation.assignedTo = assignedTo;
+            if (assignedToName) conversation.assignedToName = assignedToName;
+            if (notes) conversation.notes = notes;
+            await conversation.save();
+            
+            return res.status(200).json({ 
+                message: "Conversation reopened", 
+                conversation 
+            });
+        }
+        
+        // Create new conversation
+        conversation = new Conversation({
+            guestId,
+            guestName,
+            guestEmail,
+            guestPhone,
+            reservationId,
+            roomNumber,
+            assignedTo,
+            assignedToName,
+            notes,
+            property: propertyId
+        });
+        
+        await conversation.save();
+        
+        res.status(201).json({ 
+            message: "Conversation created successfully", 
+            conversation 
+        });
+    } catch (error) {
+        console.error('Error creating conversation:', error);
+        res.status(500).json({ message: "Server error creating conversation." });
+    }
+});
+
+// Update conversation
+router.put('/conversations/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = { ...req.body };
+        delete updateData.property;
+        
+        const Conversation = getModel(req, 'Conversation');
+        const conversation = await Conversation.findOneAndUpdate(
+            { _id: id, property: getPropertyId(req) },
+            updateData,
+            { new: true, runValidators: true }
+        );
+        
+        if (!conversation) {
+            return res.status(404).json({ message: "Conversation not found" });
+        }
+        
+        res.status(200).json({ 
+            message: "Conversation updated successfully", 
+            conversation 
+        });
+    } catch (error) {
+        console.error('Error updating conversation:', error);
+        res.status(500).json({ message: "Server error updating conversation." });
+    }
+});
+
+// ========== MESSAGES ==========
+
+// Get messages for a conversation
+router.get('/conversations/:conversationId/messages', async (req, res) => {
+    try {
+        const { conversationId } = req.params;
+        const { page = 1, limit = 50 } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const propertyId = getPropertyId(req);
+        const Message = getModel(req, 'Message');
+
+        const messages = await Message.find({ conversationId, property: propertyId })
+            .skip(skip)
+            .limit(parseInt(limit))
+            .sort({ createdAt: -1 });
+        
+        const total = await Message.countDocuments({ conversationId, property: propertyId });
+        
+        res.status(200).json({
+            messages: messages.reverse(), // Reverse to show oldest first
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(total / parseInt(limit)),
+                totalItems: total
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching messages:', error);
+        res.status(500).json({ message: "Server error fetching messages." });
+    }
+});
+
+// Send message
+router.post('/conversations/:conversationId/messages', async (req, res) => {
+    try {
+        const { conversationId } = req.params;
+        const { senderId, senderName, senderType, message, messageType, priority, category, attachments } = req.body;
+        const propertyId = getPropertyId(req);
+        const Conversation = getModel(req, 'Conversation');
+        const Message = getModel(req, 'Message');
+
+        // Verify conversation exists
+        const conversation = await Conversation.findOne({ _id: conversationId, property: propertyId });
+        if (!conversation) {
+            return res.status(404).json({ message: "Conversation not found" });
+        }
+        
+        // Create message
+        const newMessage = new Message({
+            conversationId,
+            senderId,
+            senderName,
+            senderType: senderType || 'staff',
+            message,
+            messageType: messageType || 'text',
+            priority: priority || 'normal',
+            category: category || 'general',
+            attachments: attachments || [],
+            property: propertyId
+        });
+        
+        await newMessage.save();
+        
+        // Update conversation
+        conversation.lastMessageAt = new Date();
+        if (senderType === 'guest') {
+            conversation.unreadCount = (conversation.unreadCount || 0) + 1;
+        } else {
+            // Mark as read if staff sent it
+            conversation.unreadCount = 0;
+        }
+        await conversation.save();
+        
+        res.status(201).json({ 
+            message: "Message sent successfully", 
+            message: newMessage 
+        });
+    } catch (error) {
+        console.error('Error sending message:', error);
+        res.status(500).json({ message: "Server error sending message." });
+    }
+});
+
+// Mark messages as read
+router.put('/conversations/:conversationId/messages/read', async (req, res) => {
+    try {
+        const { conversationId } = req.params;
+        const propertyId = getPropertyId(req);
+        const Message = getModel(req, 'Message');
+        const Conversation = getModel(req, 'Conversation');
+
+        await Message.updateMany(
+            { conversationId, property: propertyId, isRead: false },
+            { $set: { isRead: true, readAt: new Date() } }
+        );
+        
+        const conversation = await Conversation.findOne({ _id: conversationId, property: propertyId });
+        if (conversation) {
+            conversation.unreadCount = 0;
+            await conversation.save();
+        }
+        
+        res.status(200).json({ message: "Messages marked as read" });
+    } catch (error) {
+        console.error('Error marking messages as read:', error);
+        res.status(500).json({ message: "Server error marking messages as read." });
+    }
+});
+
+// ========== CAMPAIGNS ==========
+
+// Get all campaigns
+router.get('/campaigns', async (req, res) => {
+    try {
+        const { page = 1, limit = 20, status = '', search = '' } = req.query;
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const propertyId = getPropertyId(req);
+        const Campaign = getModel(req, 'Campaign');
+
+        const query = { property: propertyId };
+        
+        if (status) {
+            query.status = status;
+        }
+        
+        if (search && search.trim() !== '') {
+            query.name = { $regex: search, $options: 'i' };
+        }
+        
+        const total = await Campaign.countDocuments(query);
+        
+        const campaigns = await Campaign.find(query)
+            .skip(skip)
+            .limit(parseInt(limit))
+            .sort({ createdAt: -1 });
+        
+        // Calculate open rates
+        const campaignsWithStats = campaigns.map(camp => ({
+            ...camp.toObject(),
+            openRate: camp.delivered > 0 ? ((camp.opened / camp.delivered) * 100).toFixed(2) : 0
+        }));
+        
+        res.status(200).json({
+            campaigns: campaignsWithStats,
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(total / parseInt(limit)),
+                totalItems: total,
+                itemsPerPage: parseInt(limit)
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching campaigns:', error);
+        res.status(500).json({ message: "Server error fetching campaigns." });
+    }
+});
+
+// Get single campaign
+router.get('/campaigns/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const Campaign = getModel(req, 'Campaign');
+
+        const campaign = await Campaign.findOne({ _id: id, property: propertyId })
+            .populate('templateId');
+        
+        if (!campaign) {
+            return res.status(404).json({ message: "Campaign not found" });
+        }
+        
+        const campaignData = campaign.toObject();
+        campaignData.openRate = campaign.delivered > 0 ? ((campaign.opened / campaign.delivered) * 100).toFixed(2) : 0;
+        
+        res.status(200).json({ campaign: campaignData });
+    } catch (error) {
+        console.error('Error fetching campaign:', error);
+        res.status(500).json({ message: "Server error fetching campaign." });
+    }
+});
+
+// Create campaign
+router.post('/campaigns', async (req, res) => {
+    try {
+        const campaignData = {
+            ...req.body,
+            property: getPropertyId(req),
+        };
+        const Campaign = getModel(req, 'Campaign');
+
+        const campaign = new Campaign(campaignData);
+        await campaign.save();
+        
+        res.status(201).json({ 
+            message: "Campaign created successfully", 
+            campaign 
+        });
+    } catch (error) {
+        console.error('Error creating campaign:', error);
+        res.status(500).json({ message: "Server error creating campaign." });
+    }
+});
+
+// Update campaign
+router.put('/campaigns/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = { ...req.body };
+        delete updateData.property;
+        const Campaign = getModel(req, 'Campaign');
+
+        const campaign = await Campaign.findOneAndUpdate(
+            { _id: id, property: getPropertyId(req) },
+            updateData,
+            { new: true, runValidators: true }
+        );
+        
+        if (!campaign) {
+            return res.status(404).json({ message: "Campaign not found" });
+        }
+        
+        res.status(200).json({ 
+            message: "Campaign updated successfully", 
+            campaign 
+        });
+    } catch (error) {
+        console.error('Error updating campaign:', error);
+        res.status(500).json({ message: "Server error updating campaign." });
+    }
+});
+
+// Send campaign (update status and calculate recipients)
+router.post('/campaigns/:id/send', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const Campaign = getModel(req, 'Campaign');
+        const GuestProfiles = getModel(req, 'GuestProfiles');
+
+        const campaign = await Campaign.findOne({ _id: id, property: propertyId });
+        if (!campaign) {
+            return res.status(404).json({ message: "Campaign not found" });
+        }
+        
+        if (campaign.status === 'Sent') {
+            return res.status(400).json({ message: "Campaign has already been sent." });
+        }
+        
+        // Calculate recipients based on audience
+        let recipients = [];
+        let query = { property: propertyId };
+        
+        if (campaign.audience.type === 'all') {
+            // Get all guests
+            query = { property: propertyId };
+        } else if (campaign.audience.type === 'segment') {
+            // Build query based on segment criteria
+            // Use OR logic: guests matching guestType OR tags will be included
+            if (campaign.audience.segment) {
+                const segmentConditions = [];
+                
+                // Guest Type segmentation
+                if (campaign.audience.segment.guestType && campaign.audience.segment.guestType.length > 0) {
+                    segmentConditions.push({ guestType: { $in: campaign.audience.segment.guestType } });
+                }
+                
+                // Tag-based segmentation
+                if (campaign.audience.segment.tags && campaign.audience.segment.tags.length > 0) {
+                    segmentConditions.push({ tags: { $in: campaign.audience.segment.tags } });
+                }
+                
+                // Additional criteria (minVisits, minSpend, etc.) - these use AND logic
+                if (campaign.audience.segment.minVisits) {
+                    query.totalVisits = { $gte: campaign.audience.segment.minVisits };
+                }
+                if (campaign.audience.segment.minSpend) {
+                    query.totalSpend = { $gte: campaign.audience.segment.minSpend };
+                }
+                if (campaign.audience.segment.lastVisitDays) {
+                    const dateThreshold = new Date();
+                    dateThreshold.setDate(dateThreshold.getDate() - campaign.audience.segment.lastVisitDays);
+                    query['records.checkOutDate'] = { $gte: dateThreshold };
+                }
+                
+                // Combine guestType and tags with OR logic
+                if (segmentConditions.length > 0) {
+                    if (segmentConditions.length === 1) {
+                        Object.assign(query, segmentConditions[0]);
+                    } else {
+                        // Use $or to match guests with ANY of the selected guestTypes or tags
+                        query.$or = segmentConditions;
+                    }
+                }
+            }
+        } else if (campaign.audience.type === 'custom') {
+            recipients = campaign.audience.customRecipients || [];
+        }
+        
+        // Fetch guests from database if not custom
+        if (campaign.audience.type !== 'custom') {
+            const guests = await GuestProfiles.find(query).select('_id guestName guestEmail');
+            recipients = guests.map(g => ({
+                guestId: g._id,
+                email: g.guestEmail,
+                name: g.guestName
+            }));
+        }
+        
+        if (recipients.length === 0) {
+            return res.status(400).json({ message: "No recipients found for this campaign." });
+        }
+        
+        // Prepare email content
+        const subject = campaign.subject || 'Newsletter from Hotel';
+        const htmlContent = campaign.content || '';
+        
+        // Send emails using nodemailer
+        const emailResults = await emailService.sendBulkEmails(recipients, subject, htmlContent);
+        
+        // Update campaign with results
+        campaign.status = 'Sent';
+        campaign.sentAt = new Date();
+        campaign.recipients = recipients.length;
+        campaign.delivered = emailResults.sent;
+        campaign.bounced = emailResults.failed;
+        
+        await campaign.save();
+        
+        res.status(200).json({ 
+            message: "Campaign sent successfully", 
+            campaign,
+            results: {
+                totalRecipients: recipients.length,
+                sent: emailResults.sent,
+                failed: emailResults.failed,
+                errors: emailResults.errors
+            }
+        });
+    } catch (error) {
+        console.error('Error sending campaign:', error);
+        res.status(500).json({ message: "Server error sending campaign.", error: error.message });
+    }
+});
+
+// Delete campaign
+router.delete('/campaigns/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const Campaign = getModel(req, 'Campaign');
+        const campaign = await Campaign.findOneAndDelete({ _id: id, property: getPropertyId(req) });
+        
+        if (!campaign) {
+            return res.status(404).json({ message: "Campaign not found" });
+        }
+        
+        res.status(200).json({ message: "Campaign deleted successfully" });
+    } catch (error) {
+        console.error('Error deleting campaign:', error);
+        res.status(500).json({ message: "Server error deleting campaign." });
+    }
+});
+
+// Get campaign analytics
+router.get('/campaigns/:id/analytics', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const Campaign = getModel(req, 'Campaign');
+
+        const campaign = await Campaign.findOne({ _id: id, property: propertyId });
+        
+        if (!campaign) {
+            return res.status(404).json({ message: "Campaign not found" });
+        }
+        
+        const openRate = campaign.delivered > 0 ? ((campaign.opened / campaign.delivered) * 100).toFixed(2) : 0;
+        const clickRate = campaign.delivered > 0 ? ((campaign.clicked / campaign.delivered) * 100).toFixed(2) : 0;
+        const bounceRate = campaign.recipients > 0 ? ((campaign.bounced / campaign.recipients) * 100).toFixed(2) : 0;
+        
+        res.status(200).json({
+            campaign: {
+                name: campaign.name,
+                status: campaign.status,
+                sentAt: campaign.sentAt
+            },
+            analytics: {
+                recipients: campaign.recipients,
+                delivered: campaign.delivered,
+                opened: campaign.opened,
+                clicked: campaign.clicked,
+                bounced: campaign.bounced,
+                openRate: parseFloat(openRate),
+                clickRate: parseFloat(clickRate),
+                bounceRate: parseFloat(bounceRate)
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching campaign analytics:', error);
+        res.status(500).json({ message: "Server error fetching campaign analytics." });
+    }
+});
+
+// ========== TEMPLATES ==========
+
+// Get all templates
+router.get('/templates', async (req, res) => {
+    try {
+        const { category = '', search = '', isActive = '' } = req.query;
+        const propertyId = getPropertyId(req);
+        const MessageTemplate = getModel(req, 'MessageTemplate');
+        
+        const query = { property: propertyId };
+        
+        if (category) {
+            query.category = category;
+        }
+        
+        if (isActive !== '') {
+            query.isActive = isActive === 'true';
+        }
+        
+        if (search && search.trim() !== '') {
+            query.name = { $regex: search, $options: 'i' };
+        }
+        
+        const templates = await MessageTemplate.find(query)
+            .sort({ category: 1, name: 1 });
+        
+        res.status(200).json({ templates });
+    } catch (error) {
+        console.error('Error fetching templates:', error);
+        res.status(500).json({ message: "Server error fetching templates." });
+    }
+});
+
+// Get single template
+router.get('/templates/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const MessageTemplate = getModel(req, 'MessageTemplate');
+        
+        const template = await MessageTemplate.findOne({ _id: id, property: getPropertyId(req) });
+        
+        if (!template) {
+            return res.status(404).json({ message: "Template not found" });
+        }
+        
+        res.status(200).json({ template });
+    } catch (error) {
+        console.error('Error fetching template:', error);
+        res.status(500).json({ message: "Server error fetching template." });
+    }
+});
+
+// Create template
+router.post('/templates', async (req, res) => {
+    try {
+        const templateData = {
+            ...req.body,
+            property: getPropertyId(req),
+        };
+        const MessageTemplate = getModel(req, 'MessageTemplate');
+        
+        const template = new MessageTemplate(templateData);
+        await template.save();
+        
+        res.status(201).json({ 
+            message: "Template created successfully", 
+            template 
+        });
+    } catch (error) {
+        console.error('Error creating template:', error);
+        res.status(500).json({ message: "Server error creating template." });
+    }
+});
+
+// Update template
+router.put('/templates/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = { ...req.body };
+        delete updateData.property;
+        const MessageTemplate = getModel(req, 'MessageTemplate');
+        
+        const template = await MessageTemplate.findOneAndUpdate(
+            { _id: id, property: getPropertyId(req) },
+            updateData,
+            { new: true, runValidators: true }
+        );
+        
+        if (!template) {
+            return res.status(404).json({ message: "Template not found" });
+        }
+        
+        res.status(200).json({ 
+            message: "Template updated successfully", 
+            template 
+        });
+    } catch (error) {
+        console.error('Error updating template:', error);
+        res.status(500).json({ message: "Server error updating template." });
+    }
+});
+
+// Delete template
+router.delete('/templates/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const MessageTemplate = getModel(req, 'MessageTemplate');
+        
+        const template = await MessageTemplate.findOneAndDelete({ _id: id, property: getPropertyId(req) });
+        
+        if (!template) {
+            return res.status(404).json({ message: "Template not found" });
+        }
+        
+        res.status(200).json({ message: "Template deleted successfully" });
+    } catch (error) {
+        console.error('Error deleting template:', error);
+        res.status(500).json({ message: "Server error deleting template." });
+    }
+});
+
+// ========== TAGS ==========
+
+// Get all available tags from guest profiles
+router.get('/tags', async (req, res) => {
+    try {
+        const GuestProfiles = getModel(req, 'GuestProfiles');
+        const guests = await GuestProfiles.find({
+            property: getPropertyId(req),
+            tags: { $exists: true, $ne: [] }
+        }).select('tags');
+        const allTags = new Set();
+        
+        guests.forEach(guest => {
+            if (guest.tags && Array.isArray(guest.tags)) {
+                guest.tags.forEach(tag => {
+                    if (tag && tag.trim()) {
+                        allTags.add(tag.trim());
+                    }
+                });
+            }
+        });
+        
+        res.status(200).json({ 
+            tags: Array.from(allTags).sort() 
+        });
+    } catch (error) {
+        console.error('Error fetching tags:', error);
+        res.status(500).json({ message: "Server error fetching tags." });
+    }
+});
+
+// ========== ANALYTICS ==========
+
+// Get communication analytics
+router.get('/analytics', async (req, res) => {
+    try {
+        const propertyId = getPropertyId(req);
+        const Conversation = getModel(req, 'Conversation');
+        const Message = getModel(req, 'Message');
+        const Campaign = getModel(req, 'Campaign');
+
+        const totalConversations = await Conversation.countDocuments({ property: propertyId });
+        const openConversations = await Conversation.countDocuments({ property: propertyId, status: 'open' });
+        const totalMessages = await Message.countDocuments({ property: propertyId });
+        const totalCampaigns = await Campaign.countDocuments({ property: propertyId, status: 'Sent' });
+        
+        // Get recent activity
+        const recentMessages = await Message.find({ property: propertyId })
+            .sort({ createdAt: -1 })
+            .limit(10)
+            .populate('conversationId', 'guestName');
+        
+        // Calculate average open rate for campaigns
+        const sentCampaigns = await Campaign.find({ property: propertyId, status: 'Sent' });
+        let totalOpenRate = 0;
+        let campaignsWithDeliveries = 0;
+        
+        sentCampaigns.forEach(camp => {
+            if (camp.delivered > 0) {
+                totalOpenRate += (camp.opened / camp.delivered) * 100;
+                campaignsWithDeliveries++;
+            }
+        });
+        
+        const avgOpenRate = campaignsWithDeliveries > 0 
+            ? (totalOpenRate / campaignsWithDeliveries).toFixed(2)
+            : 0;
+        
+        res.status(200).json({
+            overview: {
+                totalConversations,
+                openConversations,
+                closedConversations: totalConversations - openConversations,
+                totalMessages,
+                totalCampaigns,
+                avgOpenRate: parseFloat(avgOpenRate)
+            },
+            recentActivity: recentMessages
+        });
+    } catch (error) {
+        console.error('Error fetching analytics:', error);
+        res.status(500).json({ message: "Server error fetching analytics." });
+    }
+});
+
+module.exports = router;
+

@@ -1,0 +1,355 @@
+const express = require('express');
+const bodyParser = require('body-parser');
+const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+
+const router = express.Router();
+router.use(bodyParser.json());
+router.use(authenticate);
+router.use(requireModuleAccess('guest-management'));
+
+const getModel = (req, name) => req.tenant.models[name];
+const getPropertyId = (req) => req.tenant.property._id;
+
+// Get all reviews with pagination and filtering
+router.get('/', async (req, res) => {
+    try {
+        const { 
+            page = 1, 
+            limit = 15, 
+            source = '', 
+            sentiment = '', 
+            rating = '',
+            search = ''
+        } = req.query;
+        const propertyId = getPropertyId(req);
+        const Review = getModel(req, 'Review');
+        
+        // Build filter query
+        const filterQuery = { property: propertyId };
+        
+        if (source && source !== 'all') {
+            filterQuery.source = source;
+        }
+        
+        if (sentiment && sentiment !== 'all') {
+            filterQuery.sentiment = sentiment;
+        }
+        
+        if (rating && rating !== 'all') {
+            filterQuery.rating = parseInt(rating);
+        }
+        
+        if (search) {
+            filterQuery.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { review: { $regex: search, $options: 'i' } }
+            ];
+        }
+        
+        // Calculate pagination
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        
+        // Get total count for pagination
+        const total = await Review.countDocuments(filterQuery);
+        
+        // Get paginated results
+        const reviews = await Review.find(filterQuery)
+            .skip(skip)
+            .limit(parseInt(limit))
+            .sort({ date: -1 }); // Sort by newest first
+        
+        // Calculate statistics
+        const stats = await Review.aggregate([
+            { $match: filterQuery },
+            {
+                $group: {
+                    _id: null,
+                    totalReviews: { $sum: 1 },
+                    averageRating: { $avg: '$rating' },
+                    positiveCount: {
+                        $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] }
+                    },
+                    neutralCount: {
+                        $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] }
+                    },
+                    negativeCount: {
+                        $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] }
+                    }
+                }
+            }
+        ]);
+        
+        res.status(200).json({
+            reviews,
+            pagination: {
+                currentPage: parseInt(page),
+                totalPages: Math.ceil(total / parseInt(limit)),
+                totalItems: total,
+                itemsPerPage: parseInt(limit)
+            },
+            statistics: stats[0] || {
+                totalReviews: 0,
+                averageRating: 0,
+                positiveCount: 0,
+                neutralCount: 0,
+                negativeCount: 0
+            }
+        });
+    } catch (error) {
+        console.error('Error fetching reviews:', error);
+        res.status(500).json({ message: "Server error fetching reviews." });
+    }
+});
+
+// Get all reviews (for dropdowns, etc.)
+router.get('/all', async (req, res) => {
+    try {
+        const Review = getModel(req, 'Review');
+        const reviews = await Review.find({ property: getPropertyId(req) }).sort({ date: -1 });
+        res.status(200).json(reviews);
+    } catch (error) {
+        console.error('Error fetching all reviews:', error);
+        res.status(500).json({ message: "Server error fetching all reviews." });
+    }
+});
+
+// Get review by ID
+router.get('/:id', async (req, res) => {
+    try {
+        const Review = getModel(req, 'Review');
+        const review = await Review.findOne({ _id: req.params.id, property: getPropertyId(req) });
+        if (!review) {
+            return res.status(404).json({ message: "Review not found." });
+        }
+        res.status(200).json(review);
+    } catch (error) {
+        console.error('Error fetching review:', error);
+        res.status(500).json({ message: "Server error fetching review." });
+    }
+});
+
+// Create new review
+router.post('/', async (req, res) => {
+    try {
+        const { name, review, rating, source, sentiment } = req.body;
+        
+        // Validation
+        if (!name || !review || !rating || !source || !sentiment) {
+            return res.status(400).json({ 
+                message: "All fields (name, review, rating, source, sentiment) are required." 
+            });
+        }
+        
+        if (rating < 1 || rating > 5 || !Number.isInteger(rating)) {
+            return res.status(400).json({ 
+                message: "Rating must be an integer between 1 and 5." 
+            });
+        }
+        
+        const validSources = ['Google', 'MakeMyTrip', 'Booking.com', 'Direct', 'TripAdvisor', 'Expedia'];
+        if (!validSources.includes(source)) {
+            return res.status(400).json({ 
+                message: "Invalid source. Must be one of: " + validSources.join(', ') 
+            });
+        }
+        
+        const validSentiments = ['positive', 'neutral', 'negative'];
+        if (!validSentiments.includes(sentiment)) {
+            return res.status(400).json({ 
+                message: "Invalid sentiment. Must be one of: " + validSentiments.join(', ') 
+            });
+        }
+        
+        const Review = getModel(req, 'Review');
+        const newReview = new Review({
+            name,
+            review,
+            rating,
+            source,
+            sentiment,
+            property: getPropertyId(req)
+        });
+        
+        await newReview.save();
+        res.status(201).json(newReview);
+    } catch (error) {
+        console.error('Error creating review:', error);
+        res.status(500).json({ message: "Server error creating review." });
+    }
+});
+
+// Update review
+router.put('/:id', async (req, res) => {
+    try {
+        const { name, review, rating, source, sentiment, verified } = req.body;
+        
+        const updateData = {};
+        if (name !== undefined) updateData.name = name;
+        if (review !== undefined) updateData.review = review;
+        if (rating !== undefined) {
+            if (rating < 1 || rating > 5 || !Number.isInteger(rating)) {
+                return res.status(400).json({ 
+                    message: "Rating must be an integer between 1 and 5." 
+                });
+            }
+            updateData.rating = rating;
+        }
+        if (source !== undefined) updateData.source = source;
+        if (sentiment !== undefined) updateData.sentiment = sentiment;
+        if (verified !== undefined) updateData.verified = verified;
+        
+        const Review = getModel(req, 'Review');
+        const updatedReview = await Review.findOneAndUpdate(
+            { _id: req.params.id, property: getPropertyId(req) }, 
+            updateData, 
+            { new: true, runValidators: true }
+        );
+        
+        if (!updatedReview) {
+            return res.status(404).json({ message: "Review not found." });
+        }
+        
+        res.status(200).json(updatedReview);
+    } catch (error) {
+        console.error('Error updating review:', error);
+        res.status(500).json({ message: "Server error updating review." });
+    }
+});
+
+// Delete review
+router.delete('/:id', async (req, res) => {
+    try {
+        const Review = getModel(req, 'Review');
+        const deletedReview = await Review.findOneAndDelete({ _id: req.params.id, property: getPropertyId(req) });
+        
+        if (!deletedReview) {
+            return res.status(404).json({ message: "Review not found." });
+        }
+        
+        res.status(200).json({ message: "Review deleted successfully." });
+    } catch (error) {
+        console.error('Error deleting review:', error);
+        res.status(500).json({ message: "Server error deleting review." });
+    }
+});
+
+// Get review statistics
+router.get('/stats/overview', async (req, res) => {
+    try {
+        const propertyId = getPropertyId(req);
+        const Review = getModel(req, 'Review');
+        const stats = await Review.aggregate([
+            { $match: { property: propertyId } },
+            {
+                $group: {
+                    _id: null,
+                    totalReviews: { $sum: 1 },
+                    averageRating: { $avg: '$rating' },
+                    positiveCount: {
+                        $sum: { $cond: [{ $eq: ['$sentiment', 'positive'] }, 1, 0] }
+                    },
+                    neutralCount: {
+                        $sum: { $cond: [{ $eq: ['$sentiment', 'neutral'] }, 1, 0] }
+                    },
+                    negativeCount: {
+                        $sum: { $cond: [{ $eq: ['$sentiment', 'negative'] }, 1, 0] }
+                    },
+                    ratingDistribution: {
+                        $push: '$rating'
+                    }
+                }
+            }
+        ]);
+        
+        const result = stats[0] || {
+            totalReviews: 0,
+            averageRating: 0,
+            positiveCount: 0,
+            neutralCount: 0,
+            negativeCount: 0,
+            ratingDistribution: []
+        };
+        
+        // Calculate rating distribution
+        const ratingCounts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+        result.ratingDistribution.forEach(rating => {
+            ratingCounts[rating] = (ratingCounts[rating] || 0) + 1;
+        });
+        
+        result.ratingDistribution = ratingCounts;
+        
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Error fetching review statistics:', error);
+        res.status(500).json({ message: "Server error fetching review statistics." });
+    }
+});
+
+// Add test reviews data
+router.post('/add-test-reviews', async (req, res) => {
+    try {
+        const propertyId = getPropertyId(req);
+        const Review = getModel(req, 'Review');
+        const testReviews = [
+            {
+                name: "John Smith",
+                review: "Excellent service and beautiful rooms. The staff was very helpful and the location is perfect.",
+                rating: 5,
+                source: "Google",
+                sentiment: "positive"
+            },
+            {
+                name: "Sarah Johnson",
+                review: "Good hotel but the breakfast could be better. Room was clean and comfortable.",
+                rating: 4,
+                source: "Booking.com",
+                sentiment: "positive"
+            },
+            {
+                name: "Mike Wilson",
+                review: "Average experience. Nothing special but nothing terrible either.",
+                rating: 3,
+                source: "TripAdvisor",
+                sentiment: "neutral"
+            },
+            {
+                name: "Emily Davis",
+                review: "Poor service and the room was not clean. Very disappointed with my stay.",
+                rating: 2,
+                source: "MakeMyTrip",
+                sentiment: "negative"
+            },
+            {
+                name: "David Brown",
+                review: "Amazing hotel with fantastic amenities. Will definitely come back!",
+                rating: 5,
+                source: "Direct",
+                sentiment: "positive"
+            },
+            {
+                name: "Lisa Anderson",
+                review: "The hotel is okay but overpriced for what you get.",
+                rating: 3,
+                source: "Expedia",
+                sentiment: "neutral"
+            }
+        ];
+        
+        // Clear existing reviews and add test data
+        await Review.deleteMany({ property: propertyId });
+        const createdReviews = await Review.insertMany(
+            testReviews.map(review => ({ ...review, property: propertyId }))
+        );
+        
+        res.status(200).json({ 
+            message: "Test reviews added successfully", 
+            reviews: createdReviews,
+            count: createdReviews.length 
+        });
+    } catch (error) {
+        console.error('Error adding test reviews:', error);
+        res.status(500).json({ message: "Server error adding test reviews." });
+    }
+});
+
+module.exports = router;

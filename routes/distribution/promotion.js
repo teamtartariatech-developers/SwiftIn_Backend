@@ -1,0 +1,82 @@
+const express = require('express');
+const router = express.Router();
+const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+
+router.use(express.json());
+router.use(authenticate);
+router.use(requireModuleAccess('distribution'));
+
+const getModel = (req, name) => req.tenant.models[name];
+const getPropertyId = (req) => req.tenant.property._id;
+
+router.post('/createPromotion', async (req, res) => {
+    try {
+        const { name, couponCode, lastdate, discount, discountType, isActive } = req.body;
+        const Promotion = getModel(req, 'Promotion');
+        const promotion = new Promotion({
+            name,
+            couponCode,
+            lastdate,
+            discount,
+            discountType,
+            isActive,
+            property: getPropertyId(req),
+        });
+        await promotion.save();
+        res.status(201).json(promotion);
+    } catch (error) {
+        if (error.code === 11000) {
+            return res.status(409).json({ message: 'A promotion with this coupon code already exists.' });
+        }
+        res.status(500).json({ message: error.message });
+    }
+});
+
+router.get('/getPromotions', async (req, res) => {
+    try {
+        const Promotion = getModel(req, 'Promotion');
+        const promotions = await Promotion.find({ property: getPropertyId(req) });
+        res.status(200).json(promotions);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+router.put('/updatePromotion/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, couponCode, lastdate, discount, discountType, isActive } = req.body;
+        const Promotion = getModel(req, 'Promotion');
+        const promotion = await Promotion.findOneAndUpdate(
+            { _id: id, property: getPropertyId(req) },
+            { name, couponCode, lastdate, discount, discountType, isActive },
+            { new: true }
+        );
+
+        if (!promotion) {
+            return res.status(404).json({ message: 'Promotion not found.' });
+        }
+
+        res.status(200).json(promotion);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+router.delete('/deletePromotion/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const Promotion = getModel(req, 'Promotion');
+        const result = await Promotion.findOneAndDelete({ _id: id, property: getPropertyId(req) });
+
+        if (!result) {
+            return res.status(404).json({ message: 'Promotion not found.' });
+        }
+
+        res.status(200).json({ message: 'Promotion deleted successfully' });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+module.exports = router;
