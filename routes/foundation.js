@@ -206,6 +206,56 @@ router.post('/addRoomType', requireModuleAccess('settings'), async (req,res) => 
     }
 })
 
+router.put('/roomType/:id', requireModuleAccess('settings'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const updateData = { ...req.body };
+        delete updateData.property;
+
+        const RoomType = getModel(req, 'RoomType');
+        const updatedRoomType = await RoomType.findOneAndUpdate(
+            { _id: id, property: getPropertyId(req) },
+            updateData,
+            { new: true, runValidators: true }
+        );
+
+        if (!updatedRoomType) {
+            return res.status(404).json({ message: "Room type not found." });
+        }
+
+        res.status(200).json({
+            message: "Room type updated successfully.",
+            roomType: updatedRoomType
+        });
+    } catch (error) {
+        console.error('Error updating room type:', error);
+        res.status(500).json({ message: "Server error updating room type." });
+    }
+});
+
+router.delete('/roomType/:id', requireModuleAccess('settings'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const RoomType = getModel(req, 'RoomType');
+        const deletedRoomType = await RoomType.findOneAndDelete({
+            _id: id,
+            property: getPropertyId(req)
+        });
+
+        if (!deletedRoomType) {
+            return res.status(404).json({ message: "Room type not found." });
+        }
+
+        res.status(200).json({
+            message: "Room type deleted successfully.",
+            roomType: deletedRoomType
+        });
+    } catch (error) {
+        console.error('Error deleting room type:', error);
+        res.status(500).json({ message: "Server error deleting room type." });
+    }
+});
+
 router.get('/getRoomTypes', async (req, res) => {
     try{
         const RoomType = getModel(req, 'RoomType');
@@ -228,6 +278,29 @@ router.post('/addRoom', requireModuleAccess('settings'), async (req, res) => {
         res.status(200).json({message:"Successfully added new room", newRoom})
     }catch(error){
         res.status(500).json({message: "Server error uploading room."})
+    }
+});
+
+router.delete('/Rooms/:id', requireModuleAccess('settings'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const Rooms = getModel(req, 'Rooms');
+        const deletedRoom = await Rooms.findOneAndDelete({
+            _id: id,
+            property: getPropertyId(req)
+        });
+
+        if (!deletedRoom) {
+            return res.status(404).json({ message: "Room not found." });
+        }
+
+        res.status(200).json({
+            message: "Room deleted successfully.",
+            room: deletedRoom
+        });
+    } catch (error) {
+        console.error('Error deleting room:', error);
+        res.status(500).json({ message: "Server error deleting room." });
     }
 });
 
