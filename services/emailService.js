@@ -1,132 +1,222 @@
 const nodemailer = require('nodemailer');
+const { decryptPassword } = require('../utils/emailPasswordVault');
 
-// Create reusable transporter object using the default SMTP transport
-const createTransporter = () => {
-    // Use environment variables for email configuration
-    // For development, you can use services like Gmail, Outlook, etc.
-    // For production, use proper SMTP server
-    
-    const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: process.env.SMTP_PORT || 587,
-        secure: process.env.SMTP_SECURE === 'true' ? true : false, // true for 465, false for other ports
-        auth: {
-            user: process.env.SMTP_USER, // Your email
-            pass: process.env.SMTP_PASSWORD // Your email password or app password
-        },
-        // For Gmail, you may need to use an App Password instead of regular password
-        // Enable this if using Gmail with 2FA
-        tls: {
-            rejectUnauthorized: false
-        }
-    });
+const DEFAULT_FROM_NAME = 'Hotel Management System';
 
-    return transporter;
+const parseBoolean = (value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
+  }
+  if (typeof value === 'number') {
+    return value === 1;
+  }
+  return false;
 };
 
-// Send email to a single recipient
-const sendEmail = async (to, subject, htmlContent, fromEmail = null) => {
-    try {
-        const transporter = createTransporter();
-        
-        const from = fromEmail || process.env.SMTP_FROM || process.env.SMTP_USER;
-        const fromName = process.env.SMTP_FROM_NAME || 'Hotel Management System';
-        
-        const mailOptions = {
-            from: `${fromName} <${from}>`,
-            to: to,
-            subject: subject,
-            html: htmlContent,
-            // Optional: Add text version for better compatibility
-            text: htmlContent.replace(/<[^>]*>/g, ''), // Strip HTML tags for text version
-        };
+const getEnvEmailConfig = () => {
+  const smtpHost = process.env.SMTP_HOST;
+  const smtpPort = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587;
+  const secure = parseBoolean(process.env.SMTP_SECURE);
+  const authUser = process.env.SMTP_USER;
+  const authPass = process.env.SMTP_PASSWORD;
 
-        const info = await transporter.sendMail(mailOptions);
-        return {
-            success: true,
-            messageId: info.messageId,
-            response: info.response
-        };
-    } catch (error) {
-        console.error('Error sending email:', error);
-        return {
-            success: false,
-            error: error.message
-        };
+  if (!smtpHost || !authUser || !authPass) {
+    return null;
+  }
+
+  return {
+    smtpHost,
+    smtpPort: Number.isNaN(smtpPort) ? 587 : smtpPort,
+    secure,
+    authUser,
+    authPass,
+    fromEmail: process.env.SMTP_FROM || authUser,
+    fromName: process.env.SMTP_FROM_NAME || DEFAULT_FROM_NAME,
+  };
+};
+
+const buildTransportOptions = (config) => {
+  if (!config?.smtpHost) {
+    throw new Error('SMTP host is required');
+  }
+  if (!config?.authUser || !config?.authPass) {
+    throw new Error('SMTP authentication is not configured');
+  }
+
+  return {
+    host: config.smtpHost,
+    port: config.smtpPort || 587,
+    secure: parseBoolean(config.secure),
+    auth: {
+      user: config.authUser,
+      pass: config.authPass,
+    },
+    tls: {
+      rejectUnauthorized: false,
+    },
+  };
+};
+
+const createTransporter = (config) => {
+  const options = buildTransportOptions(config);
+  return nodemailer.createTransport(options);
+};
+
+const resolveTenantEmailConfig = async (tenant) => {
+  if (tenant) {
+    const EmailIntegration = tenant.models.EmailIntegration;
+    const integration = await EmailIntegration.findOne({ property: tenant.property._id });
+
+    if (integration && integration.authPasswordEncrypted) {
+      const authPass = decryptPassword(integration.authPasswordEncrypted);
+      return {
+        smtpHost: integration.smtpHost,
+        smtpPort: integration.smtpPort,
+        secure: integration.secure,
+        authUser: integration.authUser,
+        authPass,
+        fromEmail: integration.fromEmail || integration.authUser,
+        fromName: integration.fromName || tenant.property?.name || DEFAULT_FROM_NAME,
+      };
     }
+  }
+
+  const envConfig = getEnvEmailConfig();
+  if (envConfig) {
+    return envConfig;
+  }
+
+  const error = new Error('EMAIL_INTEGRATION_NOT_CONFIGURED');
+  error.code = 'EMAIL_INTEGRATION_NOT_CONFIGURED';
+  throw error;
 };
 
-// Send bulk emails (with rate limiting to avoid spam)
-const sendBulkEmails = async (recipients, subject, htmlContent, options = {}) => {
-    const {
-        batchSize = 10, // Send emails in batches
-        delayBetweenBatches = 1000, // Delay in ms between batches
-        onProgress = null // Callback function for progress updates
-    } = options;
+const sendEmail = async (tenant, to, subject, htmlContent, options = {}) => {
+  try {
+    const config = await resolveTenantEmailConfig(tenant);
+    const transporter = createTransporter(config);
 
-    const results = {
-        total: recipients.length,
-        sent: 0,
-        failed: 0,
-        errors: []
+    const fromEmail = options.fromEmail || config.fromEmail || config.authUser;
+    const fromName =
+      options.fromName || config.fromName || tenant?.property?.name || DEFAULT_FROM_NAME;
+
+    const mailOptions = {
+      from: `${fromName} <${fromEmail}>`,
+      to,
+      subject,
+      html: htmlContent,
+      text: typeof htmlContent === 'string' ? htmlContent.replace(/<[^>]*>/g, '') : '',
     };
 
-    // Process recipients in batches
-    for (let i = 0; i < recipients.length; i += batchSize) {
-        const batch = recipients.slice(i, i + batchSize);
-        
-        // Send emails in parallel for this batch
-        const batchPromises = batch.map(async (recipient) => {
-            const result = await sendEmail(recipient.email, subject, htmlContent);
-            
-            if (result.success) {
-                results.sent++;
-            } else {
-                results.failed++;
-                results.errors.push({
-                    email: recipient.email,
-                    error: result.error
-                });
-            }
-            
-            return result;
-        });
-
-        await Promise.all(batchPromises);
-        
-        // Call progress callback if provided
-        if (onProgress) {
-            onProgress({
-                processed: Math.min(i + batchSize, recipients.length),
-                total: recipients.length,
-                sent: results.sent,
-                failed: results.failed
-            });
-        }
-        
-        // Delay before next batch (except for last batch)
-        if (i + batchSize < recipients.length) {
-            await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
-        }
+    const info = await transporter.sendMail(mailOptions);
+    if (typeof transporter.close === 'function') {
+      await transporter.close().catch(() => {});
     }
 
-    return results;
+    return {
+      success: true,
+      messageId: info.messageId,
+      response: info.response,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
 };
 
-// Verify email configuration
-const verifyEmailConfig = async () => {
-    try {
-        const transporter = createTransporter();
-        await transporter.verify();
-        return { success: true, message: 'Email configuration is valid' };
-    } catch (error) {
-        return { success: false, error: error.message };
+const sendBulkEmails = async (tenant, recipients, subject, htmlContent, options = {}) => {
+  const {
+    batchSize = 10,
+    delayBetweenBatches = 1000,
+    onProgress = null,
+    fromEmail: overrideFromEmail,
+    fromName: overrideFromName,
+  } = options;
+
+  const config = await resolveTenantEmailConfig(tenant);
+  const transporter = createTransporter(config);
+
+  const fromEmail = overrideFromEmail || config.fromEmail || config.authUser;
+  const fromName = overrideFromName || config.fromName || tenant?.property?.name || DEFAULT_FROM_NAME;
+
+  const results = {
+    total: recipients.length,
+    sent: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    for (let i = 0; i < recipients.length; i += batchSize) {
+      const batch = recipients.slice(i, i + batchSize);
+
+      const batchPromises = batch.map(async (recipient) => {
+        try {
+          const mailOptions = {
+            from: `${fromName} <${fromEmail}>`,
+            to: recipient.email,
+            subject,
+            html: htmlContent,
+            text: typeof htmlContent === 'string' ? htmlContent.replace(/<[^>]*>/g, '') : '',
+          };
+
+          await transporter.sendMail(mailOptions);
+          results.sent += 1;
+          return true;
+        } catch (error) {
+          results.failed += 1;
+          results.errors.push({
+            email: recipient.email,
+            error: error.message,
+          });
+          return false;
+        }
+      });
+
+      await Promise.all(batchPromises);
+
+      if (onProgress) {
+        onProgress({
+          processed: Math.min(i + batchSize, recipients.length),
+          total: recipients.length,
+          sent: results.sent,
+          failed: results.failed,
+        });
+      }
+
+      if (i + batchSize < recipients.length) {
+        await new Promise((resolve) => setTimeout(resolve, delayBetweenBatches));
+      }
     }
+  } finally {
+    if (typeof transporter.close === 'function') {
+      await transporter.close().catch(() => {});
+    }
+  }
+
+  return results;
+};
+
+const verifyEmailConfig = async (config) => {
+  try {
+    const transporter = createTransporter(config);
+    await transporter.verify();
+    if (typeof transporter.close === 'function') {
+      await transporter.close().catch(() => {});
+    }
+    return { success: true, message: 'Email configuration is valid' };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 };
 
 module.exports = {
-    sendEmail,
-    sendBulkEmails,
-    verifyEmailConfig,
-    createTransporter
+  sendEmail,
+  sendBulkEmails,
+  verifyEmailConfig,
+  createTransporter,
+  resolveTenantEmailConfig,
 };

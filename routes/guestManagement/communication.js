@@ -491,8 +491,13 @@ router.post('/campaigns/:id/send', async (req, res) => {
         const subject = campaign.subject || 'Newsletter from Hotel';
         const htmlContent = campaign.content || '';
         
-        // Send emails using nodemailer
-        const emailResults = await emailService.sendBulkEmails(recipients, subject, htmlContent);
+        // Send emails using tenant-specific integration
+        const emailResults = await emailService.sendBulkEmails(
+            req.tenant,
+            recipients,
+            subject,
+            htmlContent,
+        );
         
         // Update campaign with results
         campaign.status = 'Sent';
@@ -515,6 +520,11 @@ router.post('/campaigns/:id/send', async (req, res) => {
         });
     } catch (error) {
         console.error('Error sending campaign:', error);
+        if (error.code === 'EMAIL_INTEGRATION_NOT_CONFIGURED') {
+            return res.status(400).json({
+                message: 'Email integration is not configured. Please connect an SMTP provider in Settings.',
+            });
+        }
         res.status(500).json({ message: "Server error sending campaign.", error: error.message });
     }
 });

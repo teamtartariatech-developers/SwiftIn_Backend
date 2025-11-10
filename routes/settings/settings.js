@@ -3,10 +3,10 @@ const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
 const {
   hashPassword,
-  verifyPassword,
   encryptPassword,
   decryptPassword,
 } = require('../../utils/emailPasswordVault');
+const emailService = require('../../services/emailService');
 
 const router = express.Router();
 
@@ -16,6 +16,35 @@ router.use(requireModuleAccess('settings'));
 
 const getModel = (req, name) => req.tenant.models[name];
 const getPropertyId = (req) => req.tenant.property._id;
+
+const normalizeBoolean = (value, defaultValue = false) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  if (typeof value === 'string') {
+    return ['true', '1', 'yes', 'on'].includes(value.toLowerCase());
+  }
+  return defaultValue;
+};
+
+const sanitizeEmailIntegrationResponse = (integration) => {
+  if (!integration) return null;
+
+  return {
+    id: integration._id,
+    fromName: integration.fromName,
+    fromEmail: integration.fromEmail,
+    smtpHost: integration.smtpHost,
+    smtpPort: integration.smtpPort,
+    secure: integration.secure,
+    authUser: integration.authUser,
+    status: integration.status,
+    verifiedAt: integration.verifiedAt,
+    lastError: integration.lastError,
+    updatedAt: integration.updatedAt,
+    createdAt: integration.createdAt,
+    hasPassword: Boolean(integration.authPasswordEncrypted),
+  };
+};
 
 // ===== PROPERTY DETAILS ROUTES =====
 
@@ -48,11 +77,7 @@ router.get('/property', async (req, res) => {
       await property.save();
     }
     
-    const payload = property.toObject();
-    delete payload.emailPasswordHash;
-    delete payload.emailPasswordEncrypted;
-
-    res.status(200).json(payload);
+    res.status(200).json(property);
   } catch (error) {
     console.error('Error fetching property details:', error);
     res.status(500).json({ message: 'Server error fetching property details.' });
@@ -63,105 +88,177 @@ router.get('/property', async (req, res) => {
 router.put('/property', async (req, res) => {
   try {
     const updateData = { ...req.body };
-    const { emailPassword } = updateData;
     delete updateData.property;
-    delete updateData.emailPassword;
+
     const propertyId = getPropertyId(req);
     const PropertyDetails = getModel(req, 'PropertyDetails');
-    
-    let property = await PropertyDetails.findOne({ property: propertyId });
-    
-    if (property) {
-      if (property.emailPasswordHash) {
-        if (!emailPassword) {
-          return res.status(400).json({ message: 'Email password is required to save changes.' });
-        }
-        const isValid = await verifyPassword(emailPassword, property.emailPasswordHash);
-        if (!isValid) {
-          return res.status(403).json({ message: 'Invalid email password. Changes not saved.' });
-        }
-      } else if (!emailPassword) {
-        return res.status(400).json({ message: 'Email password is required to save changes.' });
-      }
 
-      if (emailPassword) {
-        updateData.emailPasswordHash = await hashPassword(emailPassword);
-        updateData.emailPasswordEncrypted = encryptPassword(emailPassword);
-      }
+    const existingProperty = await PropertyDetails.findOne({ property: propertyId });
 
-      // Update existing property
+    if (existingProperty) {
       const updatedProperty = await PropertyDetails.findOneAndUpdate(
-        { _id: property._id, property: propertyId },
+        { _id: existingProperty._id, property: propertyId },
         updateData,
-        { new: true, runValidators: true }
+        { new: true, runValidators: true },
       );
-      const responsePayload = updatedProperty.toObject();
-      delete responsePayload.emailPasswordHash;
-      delete responsePayload.emailPasswordEncrypted;
-      res.status(200).json({ 
-        message: 'Property details updated successfully', 
-        property: responsePayload 
-      });
-    } else {
-      if (!emailPassword) {
-        return res.status(400).json({ message: 'Email password is required to create property details.' });
-      }
-      updateData.emailPasswordHash = await hashPassword(emailPassword);
-      updateData.emailPasswordEncrypted = encryptPassword(emailPassword);
-      // Create new property
-      const newProperty = new PropertyDetails({
-        ...updateData,
-        property: propertyId,
-      });
-      await newProperty.save();
-      const responsePayload = newProperty.toObject();
-      delete responsePayload.emailPasswordHash;
-      delete responsePayload.emailPasswordEncrypted;
-      res.status(201).json({ 
-        message: 'Property details created successfully', 
-        property: responsePayload 
+
+      return res.status(200).json({
+        message: 'Property details updated successfully',
+        property: updatedProperty,
       });
     }
+
+    const newProperty = new PropertyDetails({
+      ...updateData,
+      property: propertyId,
+    });
+    await newProperty.save();
+
+    res.status(201).json({
+      message: 'Property details created successfully',
+      property: newProperty,
+    });
   } catch (error) {
     console.error('Error updating property details:', error);
     res.status(500).json({ message: 'Server error updating property details.' });
   }
 });
 
-router.post('/property/email/verify', async (req, res) => {
+// ===== EMAIL INTEGRATION ROUTES =====
+
+router.get('/integrations/email', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password are required.' });
+    const EmailIntegration = getModel(req, 'EmailIntegration');
+    const integration = await EmailIntegration.findOne({ property: getPropertyId(req) });
+
+    if (!integration) {
+      return res.status(200).json({
+        status: 'disconnected',
+        hasPassword: false,
+      });
     }
-    const PropertyDetails = getModel(req, 'PropertyDetails');
-    const property = await PropertyDetails.findOne({ property: getPropertyId(req) });
-    if (!property || !property.emailPasswordHash) {
-      return res.status(404).json({ message: 'No password configured for this property.' });
-    }
-    const isValid = await verifyPassword(password, property.emailPasswordHash);
-    if (!isValid) {
-      return res.status(401).json({ valid: false, message: 'Incorrect password.' });
-    }
-    return res.status(200).json({ valid: true });
+
+    res.status(200).json(sanitizeEmailIntegrationResponse(integration));
   } catch (error) {
-    console.error('Error verifying email password:', error);
-    return res.status(500).json({ message: 'Server error verifying password.' });
+    console.error('Error fetching email integration:', error);
+    res.status(500).json({ message: 'Server error fetching email integration.' });
   }
 });
 
-router.get('/property/email/password', async (req, res) => {
+router.post('/integrations/email', async (req, res) => {
   try {
-    const PropertyDetails = getModel(req, 'PropertyDetails');
-    const property = await PropertyDetails.findOne({ property: getPropertyId(req) });
-    if (!property || !property.emailPasswordEncrypted) {
-      return res.status(404).json({ message: 'No stored password for this property.' });
+    const {
+      fromName,
+      fromEmail,
+      smtpHost,
+      smtpPort,
+      secure,
+      authUser,
+      password,
+    } = req.body || {};
+
+    if (!fromName || !fromEmail || !smtpHost || !smtpPort || !authUser) {
+      return res
+        .status(400)
+        .json({ message: 'fromName, fromEmail, smtpHost, smtpPort, and authUser are required.' });
     }
-    const password = decryptPassword(property.emailPasswordEncrypted);
-    return res.status(200).json({ email: property.email, password });
+
+    const port = Number(smtpPort);
+    if (!Number.isInteger(port) || port <= 0) {
+      return res.status(400).json({ message: 'smtpPort must be a positive integer.' });
+    }
+
+    const EmailIntegration = getModel(req, 'EmailIntegration');
+    const propertyId = getPropertyId(req);
+    const existing = await EmailIntegration.findOne({ property: propertyId });
+
+    let authPassword = password?.trim();
+    if (!authPassword && existing?.authPasswordEncrypted) {
+      authPassword = decryptPassword(existing.authPasswordEncrypted);
+    }
+
+    if (!authPassword) {
+      return res.status(400).json({ message: 'SMTP password is required.' });
+    }
+
+    const verificationPayload = {
+      smtpHost: smtpHost.trim(),
+      smtpPort: port,
+      secure: normalizeBoolean(secure),
+      authUser: authUser.trim(),
+      authPass: authPassword,
+    };
+
+    const verification = await emailService.verifyEmailConfig(verificationPayload);
+    if (!verification.success) {
+      if (existing) {
+        existing.status = 'error';
+        existing.lastError = verification.error;
+        await existing.save().catch(() => {});
+      }
+      return res
+        .status(400)
+        .json({ message: verification.error || 'Unable to verify SMTP credentials.' });
+    }
+
+    const payload = {
+      fromName: fromName.trim(),
+      fromEmail: fromEmail.trim(),
+      smtpHost: smtpHost.trim(),
+      smtpPort: port,
+      secure: normalizeBoolean(secure),
+      authUser: authUser.trim(),
+      status: 'connected',
+      verifiedAt: new Date(),
+      lastError: null,
+    };
+
+    if (password) {
+      payload.authPasswordHash = await hashPassword(authPassword);
+      payload.authPasswordEncrypted = encryptPassword(authPassword);
+    } else if (existing) {
+      payload.authPasswordHash = existing.authPasswordHash;
+      payload.authPasswordEncrypted = existing.authPasswordEncrypted;
+    }
+
+    let integration;
+    if (existing) {
+      integration = await EmailIntegration.findOneAndUpdate(
+        { _id: existing._id, property: propertyId },
+        payload,
+        { new: true, runValidators: true },
+      );
+    } else {
+      integration = new EmailIntegration({
+        ...payload,
+        property: propertyId,
+      });
+      await integration.save();
+    }
+
+    res.status(existing ? 200 : 201).json({
+      message: existing
+        ? 'Email integration updated successfully.'
+        : 'Email integration connected successfully.',
+      integration: sanitizeEmailIntegrationResponse(integration),
+    });
   } catch (error) {
-    console.error('Error retrieving decrypted password:', error);
-    return res.status(500).json({ message: 'Server error retrieving password.' });
+    console.error('Error saving email integration:', error);
+    res.status(500).json({ message: 'Server error saving email integration.' });
+  }
+});
+
+router.delete('/integrations/email', async (req, res) => {
+  try {
+    const EmailIntegration = getModel(req, 'EmailIntegration');
+    const deleted = await EmailIntegration.findOneAndDelete({ property: getPropertyId(req) });
+    if (!deleted) {
+      return res.status(404).json({ message: 'Email integration not found.' });
+    }
+    res.status(200).json({ message: 'Email integration disconnected successfully.' });
+  } catch (error) {
+    console.error('Error deleting email integration:', error);
+    res.status(500).json({ message: 'Server error disconnecting email integration.' });
   }
 });
 
