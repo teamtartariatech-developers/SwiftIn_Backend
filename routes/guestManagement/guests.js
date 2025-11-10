@@ -30,8 +30,8 @@ const createGuestProfileWithReservation = async (req, res, reservationIdOverride
 
         const effectiveReservationId = reservationIdOverride || reservationId;
 
-        if (!guestName || !guestNumber || !effectiveReservationId) {
-            return res.status(400).json({ message: "guestName, guestNumber and reservationId are required." });
+        if (!guestName || !effectiveReservationId) {
+            return res.status(400).json({ message: "guestName and reservationId are required." });
         }
 
         if (!mongoose.Types.ObjectId.isValid(effectiveReservationId)) {

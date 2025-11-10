@@ -19,6 +19,8 @@ const propertyDetailsSchema = new mongoose.Schema({
   // Tax settings
   gstRate: { type: Number, default: 18, min: 0, max: 100 },
   serviceChargeRate: { type: Number, default: 10, min: 0, max: 100 },
+  emailPasswordHash: { type: String, default: null },
+  emailPasswordEncrypted: { type: String, default: null },
   // Status
   isActive: { type: Boolean, default: true }
 }, { timestamps: true });

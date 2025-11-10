@@ -4,7 +4,7 @@ const propertyScoped = require('./plugins/propertyScoped');
 const guestProfiles = new mongoose.Schema({
     guestName: { type: String, required: true },
     guestEmail: { type: String },
-    guestNumber: { type: String, required: true },
+    guestNumber: { type: String },
     reservationId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Reservations',

@@ -1,6 +1,12 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const {
+  hashPassword,
+  verifyPassword,
+  encryptPassword,
+  decryptPassword,
+} = require('../../utils/emailPasswordVault');
 
 const router = express.Router();
 
@@ -42,7 +48,11 @@ router.get('/property', async (req, res) => {
       await property.save();
     }
     
-    res.status(200).json(property);
+    const payload = property.toObject();
+    delete payload.emailPasswordHash;
+    delete payload.emailPasswordEncrypted;
+
+    res.status(200).json(payload);
   } catch (error) {
     console.error('Error fetching property details:', error);
     res.status(500).json({ message: 'Server error fetching property details.' });
@@ -53,38 +63,105 @@ router.get('/property', async (req, res) => {
 router.put('/property', async (req, res) => {
   try {
     const updateData = { ...req.body };
+    const { emailPassword } = updateData;
     delete updateData.property;
+    delete updateData.emailPassword;
     const propertyId = getPropertyId(req);
     const PropertyDetails = getModel(req, 'PropertyDetails');
     
     let property = await PropertyDetails.findOne({ property: propertyId });
     
     if (property) {
+      if (property.emailPasswordHash) {
+        if (!emailPassword) {
+          return res.status(400).json({ message: 'Email password is required to save changes.' });
+        }
+        const isValid = await verifyPassword(emailPassword, property.emailPasswordHash);
+        if (!isValid) {
+          return res.status(403).json({ message: 'Invalid email password. Changes not saved.' });
+        }
+      } else if (!emailPassword) {
+        return res.status(400).json({ message: 'Email password is required to save changes.' });
+      }
+
+      if (emailPassword) {
+        updateData.emailPasswordHash = await hashPassword(emailPassword);
+        updateData.emailPasswordEncrypted = encryptPassword(emailPassword);
+      }
+
       // Update existing property
       const updatedProperty = await PropertyDetails.findOneAndUpdate(
         { _id: property._id, property: propertyId },
         updateData,
         { new: true, runValidators: true }
       );
+      const responsePayload = updatedProperty.toObject();
+      delete responsePayload.emailPasswordHash;
+      delete responsePayload.emailPasswordEncrypted;
       res.status(200).json({ 
         message: 'Property details updated successfully', 
-        property: updatedProperty 
+        property: responsePayload 
       });
     } else {
+      if (!emailPassword) {
+        return res.status(400).json({ message: 'Email password is required to create property details.' });
+      }
+      updateData.emailPasswordHash = await hashPassword(emailPassword);
+      updateData.emailPasswordEncrypted = encryptPassword(emailPassword);
       // Create new property
       const newProperty = new PropertyDetails({
         ...updateData,
         property: propertyId,
       });
       await newProperty.save();
+      const responsePayload = newProperty.toObject();
+      delete responsePayload.emailPasswordHash;
+      delete responsePayload.emailPasswordEncrypted;
       res.status(201).json({ 
         message: 'Property details created successfully', 
-        property: newProperty 
+        property: responsePayload 
       });
     }
   } catch (error) {
     console.error('Error updating property details:', error);
     res.status(500).json({ message: 'Server error updating property details.' });
+  }
+});
+
+router.post('/property/email/verify', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required.' });
+    }
+    const PropertyDetails = getModel(req, 'PropertyDetails');
+    const property = await PropertyDetails.findOne({ property: getPropertyId(req) });
+    if (!property || !property.emailPasswordHash) {
+      return res.status(404).json({ message: 'No password configured for this property.' });
+    }
+    const isValid = await verifyPassword(password, property.emailPasswordHash);
+    if (!isValid) {
+      return res.status(401).json({ valid: false, message: 'Incorrect password.' });
+    }
+    return res.status(200).json({ valid: true });
+  } catch (error) {
+    console.error('Error verifying email password:', error);
+    return res.status(500).json({ message: 'Server error verifying password.' });
+  }
+});
+
+router.get('/property/email/password', async (req, res) => {
+  try {
+    const PropertyDetails = getModel(req, 'PropertyDetails');
+    const property = await PropertyDetails.findOne({ property: getPropertyId(req) });
+    if (!property || !property.emailPasswordEncrypted) {
+      return res.status(404).json({ message: 'No stored password for this property.' });
+    }
+    const password = decryptPassword(property.emailPasswordEncrypted);
+    return res.status(200).json({ email: property.email, password });
+  } catch (error) {
+    console.error('Error retrieving decrypted password:', error);
+    return res.status(500).json({ message: 'Server error retrieving password.' });
   }
 });
 
