@@ -181,10 +181,13 @@ router.post('/integrations/email', async (req, res) => {
       return res.status(400).json({ message: 'SMTP password is required.' });
     }
 
+    const normalizedSecure =
+      secure === undefined || secure === null ? port === 465 : normalizeBoolean(secure);
+
     const verificationPayload = {
       smtpHost: smtpHost.trim(),
       smtpPort: port,
-      secure: normalizeBoolean(secure),
+      secure: normalizedSecure,
       authUser: authUser.trim(),
       authPass: authPassword,
     };
@@ -206,7 +209,7 @@ router.post('/integrations/email', async (req, res) => {
       fromEmail: fromEmail.trim(),
       smtpHost: smtpHost.trim(),
       smtpPort: port,
-      secure: normalizeBoolean(secure),
+      secure: normalizedSecure,
       authUser: authUser.trim(),
       status: 'connected',
       verifiedAt: new Date(),

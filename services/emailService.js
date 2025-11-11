@@ -44,14 +44,21 @@ const buildTransportOptions = (config) => {
     throw new Error('SMTP authentication is not configured');
   }
 
+  const port = Number(config.smtpPort) || 587;
+  const secure = config.secure != null ? parseBoolean(config.secure) : port === 465;
+
   return {
     host: config.smtpHost,
-    port: config.smtpPort || 587,
-    secure: parseBoolean(config.secure),
+    port,
+    secure,
     auth: {
       user: config.authUser,
       pass: config.authPass,
     },
+    requireTLS: secure ? false : true,
+    connectionTimeout: config.connectionTimeout || 15000,
+    greetingTimeout: config.greetingTimeout || 15000,
+    socketTimeout: config.socketTimeout || 15000,
     tls: {
       rejectUnauthorized: false,
     },
