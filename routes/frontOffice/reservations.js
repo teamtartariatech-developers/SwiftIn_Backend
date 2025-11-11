@@ -1,6 +1,22 @@
+const formatAddress = (address) => {
+  if (!address) return '';
+  if (typeof address === 'string') return address;
+
+  const parts = [
+    address.line1 || address.addressLine1,
+    address.line2 || address.addressLine2,
+    address.city,
+    address.state,
+    address.postalCode || address.zip,
+    address.country,
+  ];
+
+  return parts.filter(Boolean).join(', ');
+};
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const emailService = require('../../services/emailService');
 
 const router = express.Router();
 router.use(bodyParser.json());
@@ -9,6 +25,84 @@ router.use(requireModuleAccess('front-office'));
 
 const getModel = (req, name) => req.tenant.models[name];
 const getPropertyId = (req) => req.tenant.property._id;
+
+const compileTemplate = (content, variables = {}) => {
+  if (!content || typeof content !== 'string') {
+    return '';
+  }
+
+  return Object.keys(variables).reduce((compiled, key) => {
+    const safeValue = variables[key] != null ? String(variables[key]) : '';
+    const pattern = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
+    return compiled.replace(pattern, safeValue);
+  }, content);
+};
+
+const sendReservationEmail = async (req, reservation) => {
+  try {
+    if (!reservation?.guestEmail) {
+      return;
+    }
+
+    const EmailTemplate = getModel(req, 'EmailTemplate');
+    const template = await EmailTemplate.findOne({
+      template_name: 'reservationMail',
+      property: getPropertyId(req),
+    });
+
+    if (!template?.content) {
+      return;
+    }
+
+    const property = req.tenant?.property || {};
+    const checkInValue = reservation.checkInDate || reservation.checkIn;
+    const checkOutValue = reservation.checkOutDate || reservation.checkOut;
+    const guestCount =
+      reservation.totalGuest ??
+      reservation.totalGuests ??
+      reservation.numberOfGuests ??
+      reservation.guestCount;
+
+    const variables = {
+      guestName: reservation.guestName || '',
+      reservationId: reservation.reservationId || reservation._id,
+      checkInDate: checkInValue ? new Date(checkInValue).toLocaleDateString('en-GB') : '',
+      checkOutDate: checkOutValue ? new Date(checkOutValue).toLocaleDateString('en-GB') : '',
+      roomType: reservation.roomType || '',
+      totalGuests: guestCount != null ? guestCount : '',
+      totalAmount: reservation.totalAmount != null ? reservation.totalAmount : '',
+      propertyName: property.name || '',
+      propertyEmail: property.email || '',
+      propertyPhone: property.phone || '',
+      propertyAddress: formatAddress(property.address),
+    };
+
+    if (variables.totalGuests !== '') {
+      variables.totalGuests = String(variables.totalGuests);
+    }
+
+    if (variables.totalAmount !== '') {
+      variables.totalAmount = String(variables.totalAmount);
+    }
+
+    const htmlBody = compileTemplate(template.content, variables);
+    const subject = template.subject || template.template_name || 'Reservation Confirmation';
+
+    const sendResult = await emailService.sendEmail(
+      req.tenant,
+      reservation.guestEmail,
+      subject,
+      htmlBody,
+      {}
+    );
+
+    if (!sendResult.success) {
+      console.error('Failed to send reservation email:', sendResult.error);
+    }
+  } catch (error) {
+    console.error('Error processing reservation email:', error);
+  }
+};
 
 router.post('/', async (req, res) => {
     try {
@@ -19,6 +113,7 @@ router.post('/', async (req, res) => {
         });
 
         await reservation.save();
+        await sendReservationEmail(req, reservation);
         res.status(201).json(reservation);
     } catch (error) {
         console.error('Error creating reservation:', error);

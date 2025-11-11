@@ -15,6 +15,7 @@ const settings = require('./routes/settings/settings');
 const folios = require('./routes/billingFinance/folios');
 const auth = require('./routes/auth/auth');
 const reports = require('./routes/reports/reports');
+const mailer = require('./routes/mailer');
 
 app.use(express.json());
 
@@ -50,6 +51,7 @@ app.use('/api/settings', settings);
 app.use('/api/billingfinance/folios', folios);
 app.use('/api/auth', auth);
 app.use('/api/reports', reports);
+app.use('/api/mailer', mailer);
 // app.use('/frontoffice', frontRouter);
 // app.use('/distribution', distRouter);
 
