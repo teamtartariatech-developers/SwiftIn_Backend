@@ -199,9 +199,10 @@ router.post('/integrations/email', async (req, res) => {
         existing.lastError = verification.error;
         await existing.save().catch(() => {});
       }
-      return res
-        .status(400)
-        .json({ message: verification.error || 'Unable to verify SMTP credentials.' });
+      return res.status(400).json({
+        message: verification.error || 'Unable to verify SMTP credentials.',
+        attempts: verification.attempts || [],
+      });
     }
 
     const payload = {
@@ -209,7 +210,7 @@ router.post('/integrations/email', async (req, res) => {
       fromEmail: fromEmail.trim(),
       smtpHost: smtpHost.trim(),
       smtpPort: port,
-      secure: normalizedSecure,
+      secure: verification.appliedConfig?.secure ?? normalizedSecure,
       authUser: authUser.trim(),
       status: 'connected',
       verifiedAt: new Date(),

@@ -46,6 +46,8 @@ const buildTransportOptions = (config) => {
 
   const port = Number(config.smtpPort) || 587;
   const secure = config.secure != null ? parseBoolean(config.secure) : port === 465;
+  const requireTLS =
+    config.requireTLS != null ? parseBoolean(config.requireTLS) : secure ? false : true;
 
   return {
     host: config.smtpHost,
@@ -55,7 +57,7 @@ const buildTransportOptions = (config) => {
       user: config.authUser,
       pass: config.authPass,
     },
-    requireTLS: secure ? false : true,
+    requireTLS,
     connectionTimeout: config.connectionTimeout || 15000,
     greetingTimeout: config.greetingTimeout || 15000,
     socketTimeout: config.socketTimeout || 15000,
@@ -68,6 +70,47 @@ const buildTransportOptions = (config) => {
 const createTransporter = (config) => {
   const options = buildTransportOptions(config);
   return nodemailer.createTransport(options);
+};
+
+const isNetworkTimeout = (error) => {
+  if (!error) return false;
+  return ['ETIMEDOUT', 'ESOCKET', 'ECONNREFUSED', 'ENOTFOUND'].includes(error.code);
+};
+
+const dedupeAttempts = (attempts) => {
+  const seen = new Set();
+  return attempts.filter((attempt) => {
+    const key = `${attempt.smtpHost}-${attempt.smtpPort}-${attempt.secure ? 's' : 'n'}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const buildVerificationAttempts = (config) => {
+  const basePort = Number(config.smtpPort) || 587;
+  const host = (config.smtpHost || '').toLowerCase();
+  const attempts = [
+    {
+      ...config,
+      smtpPort: basePort,
+      secure: config.secure != null ? parseBoolean(config.secure) : basePort === 465,
+    },
+  ];
+
+  const pushAttempt = (attempt) => {
+    attempts.push({ ...config, ...attempt });
+  };
+
+  if (host.includes('gmail') || host.includes('googlemail')) {
+    pushAttempt({ smtpPort: 465, secure: true, requireTLS: false });
+    pushAttempt({ smtpPort: 587, secure: false, requireTLS: true });
+  } else {
+    pushAttempt({ smtpPort: 465, secure: true, requireTLS: false });
+    pushAttempt({ smtpPort: 587, secure: false, requireTLS: true });
+  }
+
+  return dedupeAttempts(attempts);
 };
 
 const resolveTenantEmailConfig = async (tenant) => {
@@ -208,16 +251,57 @@ const sendBulkEmails = async (tenant, recipients, subject, htmlContent, options 
 };
 
 const verifyEmailConfig = async (config) => {
-  try {
-    const transporter = createTransporter(config);
-    await transporter.verify();
-    if (typeof transporter.close === 'function') {
-      await transporter.close().catch(() => {});
+  const attempts = buildVerificationAttempts(config);
+  const errors = [];
+
+  for (const attempt of attempts) {
+    try {
+      const transporter = createTransporter(attempt);
+      await transporter.verify();
+      if (typeof transporter.close === 'function') {
+        await transporter.close().catch(() => {});
+      }
+      return {
+        success: true,
+        message: 'Email configuration is valid',
+        appliedConfig: {
+          host: attempt.smtpHost,
+          port: attempt.smtpPort,
+          secure: parseBoolean(attempt.secure),
+        },
+      };
+    } catch (error) {
+      errors.push({
+        attempt: {
+          host: attempt.smtpHost,
+          port: attempt.smtpPort,
+          secure: parseBoolean(attempt.secure),
+        },
+        error: {
+          message: error.message,
+          code: error.code,
+        },
+      });
+
+      if (!isNetworkTimeout(error)) {
+        break;
+      }
     }
-    return { success: true, message: 'Email configuration is valid' };
-  } catch (error) {
-    return { success: false, error: error.message };
   }
+
+  const primaryError = errors[errors.length - 1] || {};
+  let message = primaryError.error?.message || 'Unable to verify SMTP credentials.';
+
+  if (isNetworkTimeout(primaryError.error)) {
+    message =
+      'Connection timeout. Please verify the port, firewall rules, and that SMTP/IMAP access is allowed for the account. For Gmail, try port 465 with SSL enabled or port 587 with TLS (secure disabled).';
+  }
+
+  return {
+    success: false,
+    error: message,
+    attempts: errors,
+  };
 };
 
 module.exports = {
