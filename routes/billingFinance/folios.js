@@ -60,7 +60,7 @@ router.get('/:id', async (req, res) => {
 // Create a new folio (automatically called when reservation is created or checked in)
 router.post('/', async (req, res) => {
     try {
-        const { reservationId, roomNumber, roomNumbers } = req.body;
+        const { reservationId, roomNumber, roomNumbers, payedAmount: overridePayedAmount, paymentMethod: overridePaymentMethod } = req.body;
         const propertyId = getPropertyId(req);
         const GuestFolio = getModel(req, 'GuestFolio');
         const Reservations = getModel(req, 'Reservations');
@@ -86,6 +86,11 @@ router.post('/', async (req, res) => {
         if (!reservation) {
             return res.status(404).json({ message: "Reservation not found." });
         }
+        
+        const payedAmount = typeof overridePayedAmount === 'number'
+            ? overridePayedAmount
+            : reservation.payedAmount || 0;
+        const paymentMethod = overridePaymentMethod || reservation.paymentMethod || 'Cash';
         
         // Generate folio ID
         const folioId = await GuestFolio.generateFolioId(propertyId);
@@ -125,11 +130,11 @@ router.post('/', async (req, res) => {
         
         // Create initial payment if advance amount exists
         const payments = [];
-        if (reservation.payedAmount && reservation.payedAmount > 0) {
+        if (payedAmount && payedAmount > 0) {
             payments.push({
                 date: new Date(),
-                method: reservation.paymentMethod || 'Cash',
-                amount: reservation.payedAmount,
+                method: paymentMethod,
+                amount: payedAmount,
                 transactionId: `ADV-${reservation._id}`
             });
         }
