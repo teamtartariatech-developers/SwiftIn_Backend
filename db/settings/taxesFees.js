@@ -21,7 +21,7 @@ const serviceFeeSchema = new mongoose.Schema({
   isPercentage: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   description: { type: String, default: '' },
-  applicableOn: { type: String, enum: ['room_rate', 'total_amount', 'per_night', 'per_booking'], default: 'per_booking' }
+  applicableOn: { type: String, enum: ['room_rate', 'total_amount', 'per_night', 'per_booking', 'per_person', 'per_person_per_night'], default: 'per_booking' }
 }, { timestamps: true });
 
 serviceFeeSchema.plugin(propertyScoped);

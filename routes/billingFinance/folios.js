@@ -114,9 +114,10 @@ router.post('/', async (req, res) => {
             : reservation.payedAmount || 0;
         const paymentMethod = normalizePaymentMethod(overridePaymentMethod || reservation.paymentMethod);
         
-        // Fetch RoomType and TaxRule models
+        // Fetch RoomType, TaxRule, and ServiceFee models
         const RoomType = getModel(req, 'RoomType');
         const TaxRule = getModel(req, 'TaxRule');
+        const ServiceFee = getModel(req, 'ServiceFee');
         
         // Fetch RoomType to get priceModel and room name
         let roomTypeData = null;
@@ -226,6 +227,92 @@ router.post('/', async (req, res) => {
                         tax: 0 // Tax is already included in amount
                     });
                 }
+            }
+        });
+        
+        // Fetch active service fees
+        const activeServiceFees = await ServiceFee.find({
+            property: propertyId,
+            isActive: true
+        });
+        
+        // Calculate guest count for per-person calculations
+        const adultCount = reservation.adultCount || reservation.numberOfAdults || reservation.adults || 0;
+        const childCount = reservation.childCount || reservation.numberOfChildren || reservation.children || 0;
+        const totalGuests = adultCount + childCount || reservation.totalGuest || 1;
+        const numberOfRooms = finalRoomNumbers.length || reservation.numberOfRooms || 1;
+        
+        // Calculate and add service fee items
+        activeServiceFees.forEach(serviceFee => {
+            let feeAmount = 0;
+            
+            if (serviceFee.applicableOn === 'per_night') {
+                // Per night: multiply by number of nights
+                if (serviceFee.isPercentage) {
+                    // Percentage of accommodation per night
+                    const accommodationPerNight = accommodationTotal / nights;
+                    feeAmount = (accommodationPerNight * serviceFee.amount) / 100 * nights;
+                } else {
+                    // Fixed amount per night
+                    feeAmount = serviceFee.amount * nights;
+                }
+            } else if (serviceFee.applicableOn === 'per_booking') {
+                // Per booking: one-time fee
+                if (serviceFee.isPercentage) {
+                    feeAmount = (accommodationTotal * serviceFee.amount) / 100;
+                } else {
+                    feeAmount = serviceFee.amount;
+                }
+            } else if (serviceFee.applicableOn === 'per_person') {
+                // Per person: multiply by total number of guests
+                if (serviceFee.isPercentage) {
+                    // Percentage of accommodation per person
+                    feeAmount = (accommodationTotal * serviceFee.amount) / 100;
+                } else {
+                    // Fixed amount per person
+                    feeAmount = serviceFee.amount * totalGuests;
+                }
+            } else if (serviceFee.applicableOn === 'per_person_per_night') {
+                // Per person per night: multiply by guests and nights
+                if (serviceFee.isPercentage) {
+                    // Percentage of accommodation per person per night
+                    const accommodationPerNight = accommodationTotal / nights;
+                    feeAmount = (accommodationPerNight * serviceFee.amount) / 100 * totalGuests * nights;
+                } else {
+                    // Fixed amount per person per night
+                    feeAmount = serviceFee.amount * totalGuests * nights;
+                }
+            } else if (serviceFee.applicableOn === 'room_rate' || serviceFee.applicableOn === 'total_amount') {
+                // Based on room rate or total amount
+                if (serviceFee.isPercentage) {
+                    feeAmount = (accommodationTotal * serviceFee.amount) / 100;
+                } else {
+                    feeAmount = serviceFee.amount;
+                }
+            }
+            
+            if (feeAmount > 0) {
+                let description = serviceFee.name;
+                if (serviceFee.isPercentage) {
+                    description += ` (${serviceFee.amount}%)`;
+                }
+                if (serviceFee.applicableOn === 'per_night') {
+                    description += ` - ${nights} night${nights > 1 ? 's' : ''}`;
+                } else if (serviceFee.applicableOn === 'per_person') {
+                    description += ` - ${totalGuests} guest${totalGuests > 1 ? 's' : ''}`;
+                } else if (serviceFee.applicableOn === 'per_person_per_night') {
+                    description += ` - ${totalGuests} guest${totalGuests > 1 ? 's' : ''} × ${nights} night${nights > 1 ? 's' : ''}`;
+                }
+                
+                items.push({
+                    description: description,
+                    date: checkIn,
+                    amount: feeAmount,
+                    department: 'Room',
+                    quantity: 1,
+                    unitPrice: feeAmount,
+                    tax: 0
+                });
             }
         });
         
