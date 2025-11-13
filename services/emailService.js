@@ -161,7 +161,11 @@ const sendEmail = async (tenant, to, subject, htmlContent, options = {}) => {
 
     const info = await transporter.sendMail(mailOptions);
     if (typeof transporter.close === 'function') {
-      await transporter.close().catch(() => {});
+      try {
+        transporter.close();
+      } catch (closeError) {
+        // ignore close error
+      }
     }
 
     return {
@@ -243,7 +247,11 @@ const sendBulkEmails = async (tenant, recipients, subject, htmlContent, options 
     }
   } finally {
     if (typeof transporter.close === 'function') {
-      await transporter.close().catch(() => {});
+      try {
+        transporter.close();
+      } catch (closeError) {
+        // ignore close error
+      }
     }
   }
 
@@ -259,7 +267,11 @@ const verifyEmailConfig = async (config) => {
       const transporter = createTransporter(attempt);
       await transporter.verify();
       if (typeof transporter.close === 'function') {
-        await transporter.close().catch(() => {});
+        try {
+          transporter.close();
+        } catch (closeError) {
+          // ignore close error
+        }
       }
       return {
         success: true,

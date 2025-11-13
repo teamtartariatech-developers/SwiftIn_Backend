@@ -202,6 +202,7 @@ router.post('/integrations/email', async (req, res) => {
       return res.status(400).json({
         message: verification.error || 'Unable to verify SMTP credentials.',
         attempts: verification.attempts || [],
+        appliedConfig: verification.appliedConfig,
       });
     }
 
@@ -244,7 +245,12 @@ router.post('/integrations/email', async (req, res) => {
       message: existing
         ? 'Email integration updated successfully.'
         : 'Email integration connected successfully.',
-      integration: sanitizeEmailIntegrationResponse(integration),
+      integration: {
+        ...sanitizeEmailIntegrationResponse(integration),
+        appliedConfig: verification.appliedConfig,
+        hasPassword: Boolean(integration.authPasswordEncrypted),
+        attempts: verification.attempts || [],
+      },
     });
   } catch (error) {
     console.error('Error saving email integration:', error);

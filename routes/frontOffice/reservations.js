@@ -26,6 +26,111 @@ router.use(requireModuleAccess('front-office'));
 const getModel = (req, name) => req.tenant.models[name];
 const getPropertyId = (req) => req.tenant.property._id;
 
+// Helper function to create folio for a reservation
+const createFolioForReservation = async (req, reservation) => {
+    try {
+        const propertyId = getPropertyId(req);
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const Rooms = getModel(req, 'Rooms');
+        
+        // Check if folio already exists for this reservation
+        const existingFolio = await GuestFolio.findOne({ 
+            reservationId: reservation._id,
+            property: propertyId,
+            status: 'active'
+        });
+        
+        if (existingFolio) {
+            return existingFolio; // Return existing folio
+        }
+        
+        // Get room numbers from reservation
+        let finalRoomNumbers = [];
+        if (reservation.roomNumbers && reservation.roomNumbers.length > 0) {
+            // If reservation has room IDs, fetch room numbers
+            const rooms = await Rooms.find({ _id: { $in: reservation.roomNumbers }, property: propertyId });
+            finalRoomNumbers = rooms.map(r => r.roomNumber);
+        }
+        
+        // Generate folio ID
+        const folioId = await GuestFolio.generateFolioId(propertyId);
+        
+        // Create initial room charge items
+        const checkIn = new Date(reservation.checkInDate);
+        const checkOut = new Date(reservation.checkOutDate);
+        const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+        
+        const items = [];
+        // Create room charge items if we have room numbers, otherwise create a single placeholder charge
+        if (finalRoomNumbers.length > 0) {
+            for (let i = 0; i < nights; i++) {
+                const nightDate = new Date(checkIn);
+                nightDate.setDate(nightDate.getDate() + i);
+                
+                finalRoomNumbers.forEach(roomNum => {
+                    items.push({
+                        description: `Room Charge - Night ${i + 1} (Room ${roomNum})`,
+                        date: nightDate,
+                        amount: reservation.totalAmount / (nights * finalRoomNumbers.length || 1),
+                        department: 'Room',
+                        quantity: 1
+                    });
+                });
+            }
+        } else {
+            // For reservations without rooms assigned yet, create a placeholder charge
+            // This will be updated when rooms are assigned during check-in
+            items.push({
+                description: `Room Charge - Pending Room Assignment`,
+                date: checkIn,
+                amount: reservation.totalAmount || 0,
+                department: 'Room',
+                quantity: 1
+            });
+        }
+        
+        // Create initial payment if advance amount exists
+        const payments = [];
+        const payedAmount = reservation.payedAmount || 0;
+        const paymentMethod = reservation.paymentMethod || 'Cash';
+        
+        if (payedAmount && payedAmount > 0) {
+            payments.push({
+                date: new Date(),
+                method: paymentMethod,
+                amount: payedAmount,
+                transactionId: `ADV-${reservation._id}`
+            });
+        }
+        
+        // Create folio
+        const newFolio = new GuestFolio({
+            folioId,
+            reservationId: reservation._id,
+            guestName: reservation.guestName,
+            guestEmail: reservation.guestEmail,
+            guestPhone: reservation.guestNumber,
+            roomNumber: finalRoomNumbers[0] || '',
+            roomNumbers: finalRoomNumbers,
+            checkIn: checkIn,
+            checkOut: checkOut,
+            items: items,
+            payments: payments,
+            status: 'active',
+            property: propertyId
+        });
+        
+        newFolio.calculateBalance();
+        await newFolio.save();
+        
+        console.log(`Folio created for reservation ${reservation._id} with paid amount: ${payedAmount}`);
+        return newFolio;
+    } catch (error) {
+        console.error('Error creating folio for reservation:', error);
+        return null; // Don't throw, just log and return null
+    }
+};
+
 const compileTemplate = (content, variables = {}) => {
   if (!content || typeof content !== 'string') {
     return '';
@@ -113,6 +218,20 @@ router.post('/', async (req, res) => {
         });
 
         await reservation.save();
+        
+        // Check if check-in date is today - if so, create folio automatically
+        if (reservation.checkInDate) {
+            const checkInDate = new Date(reservation.checkInDate);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            checkInDate.setHours(0, 0, 0, 0);
+            
+            if (checkInDate.getTime() === today.getTime()) {
+                // Same day check-in, create folio automatically
+                await createFolioForReservation(req, reservation);
+            }
+        }
+        
         await sendReservationEmail(req, reservation);
         res.status(201).json(reservation);
     } catch (error) {
@@ -249,6 +368,11 @@ router.get('/:id', async (req, res) => {
 router.put('/:id', async (req, res) => {
     try {
         const Reservations = getModel(req, 'Reservations');
+        const oldReservation = await Reservations.findOne({
+            _id: req.params.id,
+            property: getPropertyId(req)
+        });
+        
         const reservation = await Reservations.findOneAndUpdate(
             { _id: req.params.id, property: getPropertyId(req) },
             { ...req.body, property: getPropertyId(req) },
@@ -257,6 +381,11 @@ router.put('/:id', async (req, res) => {
 
         if (!reservation) {
             return res.status(404).json({ message: 'Reservation not found.' });
+        }
+
+        // If status is being updated to 'checked-in', create folio automatically
+        if (req.body.status === 'checked-in' && (!oldReservation || oldReservation.status !== 'checked-in')) {
+            await createFolioForReservation(req, reservation);
         }
 
         res.status(200).json(reservation);
