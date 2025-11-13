@@ -114,6 +114,19 @@ router.post('/', async (req, res) => {
             : reservation.payedAmount || 0;
         const paymentMethod = normalizePaymentMethod(overridePaymentMethod || reservation.paymentMethod);
         
+        // Fetch RoomType and TaxRule models
+        const RoomType = getModel(req, 'RoomType');
+        const TaxRule = getModel(req, 'TaxRule');
+        
+        // Fetch RoomType to get priceModel and room name
+        let roomTypeData = null;
+        if (reservation.roomType) {
+            roomTypeData = await RoomType.findOne({
+                _id: reservation.roomType,
+                property: propertyId,
+            });
+        }
+        
         // Generate folio ID
         const folioId = await GuestFolio.generateFolioId(propertyId);
         
@@ -129,26 +142,92 @@ router.post('/', async (req, res) => {
             finalRoomNumbers = [roomNumber];
         }
         
-        // Create initial room charge items
+        // Create accommodation charge items based on priceModel
         const checkIn = new Date(reservation.checkInDate);
         const checkOut = new Date(reservation.checkOutDate);
         const nights = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+        const roomTypeName = roomTypeData?.name || 'Room';
         
         const items = [];
-        for (let i = 0; i < nights; i++) {
-            const nightDate = new Date(checkIn);
-            nightDate.setDate(nightDate.getDate() + i);
+        const priceModel = roomTypeData?.priceModel || 'perRoom';
+        
+        if (priceModel === 'perPerson') {
+            // For perPerson: Single accommodation charge with total guests and room name
+            const adultCount = reservation.adultCount || reservation.numberOfAdults || reservation.adults || 0;
+            const childCount = reservation.childCount || reservation.numberOfChildren || reservation.children || 0;
+            const totalGuests = adultCount + childCount || reservation.totalGuest || 1;
             
-            finalRoomNumbers.forEach(roomNum => {
-                items.push({
-                    description: `Room Charge - Night ${i + 1} (Room ${roomNum})`,
-                    date: nightDate,
-                    amount: reservation.totalAmount / (nights * finalRoomNumbers.length || 1),
-                    department: 'Room',
-                    quantity: 1
-                });
+            items.push({
+                description: `Accommodation - ${roomTypeName} (${totalGuests} Guest${totalGuests > 1 ? 's' : ''})`,
+                date: checkIn,
+                amount: reservation.totalAmount || 0,
+                department: 'Room',
+                quantity: 1,
+                unitPrice: reservation.totalAmount || 0
             });
+        } else {
+            // For perRoom: Separate charges for each room
+            const numberOfRooms = finalRoomNumbers.length || reservation.numberOfRooms || 1;
+            const roomChargePerRoom = (reservation.totalAmount || 0) / numberOfRooms;
+            
+            if (finalRoomNumbers.length > 0) {
+                // If we have room numbers, create a charge for each room
+                finalRoomNumbers.forEach((roomNum, index) => {
+                    items.push({
+                        description: `Accommodation - ${roomTypeName} (Room ${roomNum})`,
+                        date: checkIn,
+                        amount: roomChargePerRoom,
+                        department: 'Room',
+                        quantity: 1,
+                        unitPrice: roomChargePerRoom
+                    });
+                });
+            } else {
+                // If no room numbers yet, create charges based on numberOfRooms
+                for (let i = 0; i < numberOfRooms; i++) {
+                    items.push({
+                        description: `Accommodation - ${roomTypeName} (Room ${i + 1})`,
+                        date: checkIn,
+                        amount: roomChargePerRoom,
+                        department: 'Room',
+                        quantity: 1,
+                        unitPrice: roomChargePerRoom
+                    });
+                }
+            }
         }
+        
+        // Fetch active tax rules
+        const activeTaxRules = await TaxRule.find({
+            property: propertyId,
+            isActive: true
+        });
+        
+        // Calculate and add tax items
+        const accommodationTotal = reservation.totalAmount || 0;
+        activeTaxRules.forEach(taxRule => {
+            // Check if tax applies to room_rate or total_amount
+            if (taxRule.applicableOn === 'room_rate' || taxRule.applicableOn === 'total_amount' || taxRule.applicableOn === 'all') {
+                let taxAmount = 0;
+                if (taxRule.isPercentage) {
+                    taxAmount = (accommodationTotal * taxRule.rate) / 100;
+                } else {
+                    taxAmount = taxRule.rate;
+                }
+                
+                if (taxAmount > 0) {
+                    items.push({
+                        description: `${taxRule.name}${taxRule.isPercentage ? ` (${taxRule.rate}%)` : ''}`,
+                        date: checkIn,
+                        amount: taxAmount,
+                        department: 'Room',
+                        quantity: 1,
+                        unitPrice: taxAmount,
+                        tax: 0 // Tax is already included in amount
+                    });
+                }
+            }
+        });
         
         // Create initial payment if advance amount exists
         const payments = [];
@@ -157,7 +236,8 @@ router.post('/', async (req, res) => {
                 date: new Date(),
                 method: paymentMethod,
                 amount: payedAmount,
-                transactionId: `ADV-${reservation._id}`
+                transactionId: `ADV-${reservation._id}`,
+                notes: 'Advance payment'
             });
         }
         
