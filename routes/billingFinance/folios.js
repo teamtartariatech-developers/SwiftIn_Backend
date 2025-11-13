@@ -10,6 +10,28 @@ router.use(requireModuleAccess('billing-finance'));
 const getModel = (req, name) => req.tenant.models[name];
 const getPropertyId = (req) => req.tenant.property._id;
 
+// Helper function to normalize payment method to match enum values
+const normalizePaymentMethod = (method) => {
+  if (!method) return 'Cash';
+  
+  const methodLower = method.toLowerCase().trim();
+  const validMethods = {
+    'cash': 'Cash',
+    'credit card': 'Credit Card',
+    'creditcard': 'Credit Card',
+    'debit card': 'Debit Card',
+    'debitcard': 'Debit Card',
+    'upi': 'UPI',
+    'bank transfer': 'Bank Transfer',
+    'banktransfer': 'Bank Transfer',
+    'wallet': 'Wallet',
+    'cheque': 'Cheque',
+    'check': 'Cheque'
+  };
+  
+  return validMethods[methodLower] || 'Cash';
+};
+
 // Get all active folios
 router.get('/', async (req, res) => {
     try {
@@ -90,7 +112,7 @@ router.post('/', async (req, res) => {
         const payedAmount = typeof overridePayedAmount === 'number'
             ? overridePayedAmount
             : reservation.payedAmount || 0;
-        const paymentMethod = overridePaymentMethod || reservation.paymentMethod || 'Cash';
+        const paymentMethod = normalizePaymentMethod(overridePaymentMethod || reservation.paymentMethod);
         
         // Generate folio ID
         const folioId = await GuestFolio.generateFolioId(propertyId);
@@ -218,7 +240,7 @@ router.post('/:id/payments', async (req, res) => {
         
         folio.payments.push({
             date: date ? new Date(date) : new Date(),
-            method: method || 'Cash',
+            method: normalizePaymentMethod(method),
             amount: amount || 0,
             transactionId,
             notes
@@ -334,25 +356,7 @@ router.post('/:id/checkout', async (req, res) => {
     }
 });
 
-// Get a single bill by ID
-router.get('/bills/:id', async (req, res) => {
-    try {
-        const { id } = req.params;
-        const Bill = getModel(req, 'Bill');
-        const bill = await Bill.findOne({ _id: id, property: getPropertyId(req) }).populate('reservationId');
-        
-        if (!bill) {
-            return res.status(404).json({ message: "Bill not found." });
-        }
-        
-        res.status(200).json(bill);
-    } catch (error) {
-        console.error('Error fetching bill:', error);
-        res.status(500).json({ message: "Server error fetching bill." });
-    }
-});
-
-// Get all permanent bills (for historical records)
+// Get all permanent bills (for historical records) - MUST be before /bills/:id route
 router.get('/bills/all', async (req, res) => {
     try {
         const { search, page = 1, limit = 50 } = req.query;
@@ -391,6 +395,31 @@ router.get('/bills/all', async (req, res) => {
     } catch (error) {
         console.error('Error fetching bills:', error);
         res.status(500).json({ message: "Server error fetching bills." });
+    }
+});
+
+// Get a single bill by ID - MUST be after /bills/all route
+router.get('/bills/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Validate ObjectId format
+        const mongoose = require('mongoose');
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: "Invalid bill ID format." });
+        }
+        
+        const Bill = getModel(req, 'Bill');
+        const bill = await Bill.findOne({ _id: id, property: getPropertyId(req) }).populate('reservationId');
+        
+        if (!bill) {
+            return res.status(404).json({ message: "Bill not found." });
+        }
+        
+        res.status(200).json(bill);
+    } catch (error) {
+        console.error('Error fetching bill:', error);
+        res.status(500).json({ message: "Server error fetching bill." });
     }
 });
 

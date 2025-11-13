@@ -13,6 +13,28 @@ const formatAddress = (address) => {
 
   return parts.filter(Boolean).join(', ');
 };
+
+// Helper function to normalize payment method to match enum values
+const normalizePaymentMethod = (method) => {
+  if (!method) return 'Cash';
+  
+  const methodLower = method.toLowerCase().trim();
+  const validMethods = {
+    'cash': 'Cash',
+    'credit card': 'Credit Card',
+    'creditcard': 'Credit Card',
+    'debit card': 'Debit Card',
+    'debitcard': 'Debit Card',
+    'upi': 'UPI',
+    'bank transfer': 'Bank Transfer',
+    'banktransfer': 'Bank Transfer',
+    'wallet': 'Wallet',
+    'cheque': 'Cheque',
+    'check': 'Cheque'
+  };
+  
+  return validMethods[methodLower] || 'Cash';
+};
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
@@ -92,7 +114,7 @@ const createFolioForReservation = async (req, reservation) => {
         // Create initial payment if advance amount exists
         const payments = [];
         const payedAmount = reservation.payedAmount || 0;
-        const paymentMethod = reservation.paymentMethod || 'Cash';
+        const paymentMethod = normalizePaymentMethod(reservation.paymentMethod);
         
         if (payedAmount && payedAmount > 0) {
             payments.push({
@@ -159,27 +181,86 @@ const sendReservationEmail = async (req, reservation) => {
       return;
     }
 
+    // Fetch PropertyDetails for additional variables from settings
+    const PropertyDetails = getModel(req, 'PropertyDetails');
+    const propertyDetails = await PropertyDetails.findOne({
+      property: getPropertyId(req),
+    });
+
+    // Fetch RoomType to get priceModel for calculating totalGuests
+    const RoomType = getModel(req, 'RoomType');
+    let roomTypeData = null;
+    if (reservation.roomType) {
+      roomTypeData = await RoomType.findOne({
+        _id: reservation.roomType,
+        property: getPropertyId(req),
+      });
+    }
+
     const property = req.tenant?.property || {};
     const checkInValue = reservation.checkInDate || reservation.checkIn;
     const checkOutValue = reservation.checkOutDate || reservation.checkOut;
-    const guestCount =
-      reservation.totalGuest ??
-      reservation.totalGuests ??
-      reservation.numberOfGuests ??
-      reservation.guestCount;
+    
+    // Calculate totalGuests based on room type pricing model
+    let guestCount = null;
+    if (roomTypeData && roomTypeData.priceModel) {
+      if (roomTypeData.priceModel === 'perPerson') {
+        // For perPerson: totalGuests = adultCount + childCount
+        // Check multiple possible field names for adult and child counts
+        const adultCount = reservation.adultCount ?? reservation.numberOfAdults ?? reservation.adults;
+        const childCount = reservation.childCount ?? reservation.numberOfChildren ?? reservation.children;
+        
+        // If we have explicit adult/child counts, use them
+        if (adultCount != null || childCount != null) {
+          guestCount = (Number(adultCount) || 0) + (Number(childCount) || 0);
+        } else {
+          // If no explicit counts, use totalGuest as the total (it's likely already the sum)
+          // Only fall back to baseOccupancy if totalGuest is also missing
+          guestCount = reservation.totalGuest ?? reservation.totalGuests ?? reservation.numberOfGuests ?? 
+                      (roomTypeData.baseOccupancy || 1);
+        }
+      } else if (roomTypeData.priceModel === 'perRoom') {
+        // For perRoom: totalGuests = numberOfGuests + extraGuests
+        const numberOfGuests = reservation.numberOfGuests ?? reservation.totalGuest ?? (roomTypeData.baseOccupancy || 1);
+        const extraGuests = reservation.extraGuests ?? reservation.extraGuestCount ?? 0;
+        guestCount = (Number(numberOfGuests) || 0) + (Number(extraGuests) || 0);
+      } else {
+        // For hybrid or unknown, use existing logic
+        guestCount = reservation.totalGuest ?? reservation.totalGuests ?? reservation.numberOfGuests ?? reservation.guestCount;
+      }
+    } else {
+      // Fallback to existing logic if room type not found
+      guestCount = reservation.totalGuest ?? reservation.totalGuests ?? reservation.numberOfGuests ?? reservation.guestCount;
+    }
 
     const variables = {
       guestName: reservation.guestName || '',
       reservationId: reservation.reservationId || reservation._id,
       checkInDate: checkInValue ? new Date(checkInValue).toLocaleDateString('en-GB') : '',
       checkOutDate: checkOutValue ? new Date(checkOutValue).toLocaleDateString('en-GB') : '',
-      roomType: reservation.roomType || '',
+      roomType: roomTypeData?.name || reservation.roomType || '',
       totalGuests: guestCount != null ? guestCount : '',
       totalAmount: reservation.totalAmount != null ? reservation.totalAmount : '',
-      propertyName: property.name || '',
-      propertyEmail: property.email || '',
-      propertyPhone: property.phone || '',
-      propertyAddress: formatAddress(property.address),
+      paidAmount: reservation.payedAmount != null ? reservation.payedAmount : '',
+      balanceAmount: (reservation.totalAmount != null && reservation.payedAmount != null) 
+        ? (reservation.totalAmount - reservation.payedAmount) 
+        : (reservation.totalAmount != null ? reservation.totalAmount : ''),
+      // Basic property info (from PropertyDetails if available, fallback to tenant property)
+      propertyName: propertyDetails?.propertyName || property.name || '',
+      propertyEmail: propertyDetails?.email || property.email || '',
+      propertyPhone: propertyDetails?.phone || property.phone || '',
+      propertyAddress: propertyDetails?.address || formatAddress(property.address) || '',
+      // Additional property details from settings/property page
+      propertyWebsite: propertyDetails?.website || '',
+      checkInTime: propertyDetails?.checkInTime || '14:00',
+      checkOutTime: propertyDetails?.checkOutTime || '11:00',
+      cancellationPolicy: propertyDetails?.cancellationPolicy || '',
+      generalPolicies: propertyDetails?.generalPolicies || '',
+      gstin: propertyDetails?.gstin || '',
+      currency: propertyDetails?.currency || 'INR',
+      timezone: propertyDetails?.timezone || 'Asia/Kolkata',
+      gstRate: propertyDetails?.gstRate != null ? String(propertyDetails.gstRate) : '18',
+      serviceChargeRate: propertyDetails?.serviceChargeRate != null ? String(propertyDetails.serviceChargeRate) : '10',
     };
 
     if (variables.totalGuests !== '') {
@@ -188,6 +269,14 @@ const sendReservationEmail = async (req, reservation) => {
 
     if (variables.totalAmount !== '') {
       variables.totalAmount = String(variables.totalAmount);
+    }
+
+    if (variables.paidAmount !== '') {
+      variables.paidAmount = String(variables.paidAmount);
+    }
+
+    if (variables.balanceAmount !== '') {
+      variables.balanceAmount = String(variables.balanceAmount);
     }
 
     const htmlBody = compileTemplate(template.content, variables);
@@ -219,7 +308,7 @@ router.post('/', async (req, res) => {
 
         await reservation.save();
         
-        // Check if check-in date is today - if so, create folio automatically
+        // Check if check-in date is today - if so, create folio and guest profile automatically
         if (reservation.checkInDate) {
             const checkInDate = new Date(reservation.checkInDate);
             const today = new Date();
@@ -229,6 +318,93 @@ router.post('/', async (req, res) => {
             if (checkInDate.getTime() === today.getTime()) {
                 // Same day check-in, create folio automatically
                 await createFolioForReservation(req, reservation);
+                
+                // Create or update guest profile for same-day reservation (like check-in)
+                try {
+                    const propertyId = getPropertyId(req);
+                    const guestProfiles = getModel(req, 'GuestProfiles');
+                    
+                    // Check if guest already exists by email or phone
+                    const identifierQuery = [];
+                    if (reservation.guestEmail) identifierQuery.push({ guestEmail: reservation.guestEmail });
+                    if (reservation.guestNumber) identifierQuery.push({ guestNumber: reservation.guestNumber });
+
+                    let existingGuest = null;
+                    if (identifierQuery.length > 0) {
+                        existingGuest = await guestProfiles.findOne({
+                            property: propertyId,
+                            $or: identifierQuery
+                        });
+                    }
+
+                    const checkIn = reservation.checkInDate ? new Date(reservation.checkInDate) : new Date();
+                    const checkOut = reservation.checkOutDate ? new Date(reservation.checkOutDate) : new Date();
+                    const totalSpend = reservation.payedAmount || reservation.advanceAmount || 0;
+
+                    const buildStayRecord = () => {
+                        return {
+                            checkInDate: checkIn,
+                            checkOutDate: checkOut,
+                            amount: totalSpend
+                        };
+                    };
+
+                    if (existingGuest) {
+                        // Update existing guest
+                        const newStayRecord = buildStayRecord();
+                        const allRecords = [...existingGuest.records, newStayRecord];
+                        const totalNights = allRecords.reduce((sum, record) => {
+                            const checkIn = new Date(record.checkInDate);
+                            const checkOut = new Date(record.checkOutDate);
+                            const nights = Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24));
+                            return sum + nights;
+                        }, 0);
+                        const averageStay = totalNights / allRecords.length;
+
+                        await guestProfiles.findOneAndUpdate(
+                            { _id: existingGuest._id, property: propertyId },
+                            {
+                                $set: {
+                                    totalVisits: existingGuest.totalVisits + 1,
+                                    totalSpend: existingGuest.totalSpend + totalSpend,
+                                    AverageStay: Math.round(averageStay * 100) / 100,
+                                    reservationId: reservation._id
+                                },
+                                $push: { records: newStayRecord }
+                            },
+                            { new: true, runValidators: true }
+                        );
+                        console.log(`Guest profile updated for same-day reservation: ${reservation._id}`);
+                    } else {
+                        // Create new guest
+                        const newStayRecord = buildStayRecord();
+                        const checkInDate = new Date(newStayRecord.checkInDate);
+                        const checkOutDate = new Date(newStayRecord.checkOutDate);
+                        const nights = Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
+                        const averageStay = nights;
+
+                        const newGuest = new guestProfiles({
+                            guestName: reservation.guestName,
+                            guestEmail: reservation.guestEmail,
+                            guestNumber: reservation.guestNumber,
+                            guestType: 'regular',
+                            reservationId: reservation._id,
+                            aadhaarNumber: reservation.adhaarNumber,
+                            adultCount: reservation.totalGuest || 1,
+                            childCount: 0,
+                            totalVisits: 1,
+                            totalSpend: totalSpend,
+                            AverageStay: averageStay,
+                            records: [newStayRecord],
+                            property: propertyId
+                        });
+                        await newGuest.save();
+                        console.log(`Guest profile created for same-day reservation: ${reservation._id}`);
+                    }
+                } catch (guestError) {
+                    console.error('Error creating/updating guest profile for same-day reservation:', guestError);
+                    // Don't fail the reservation creation if guest profile creation fails
+                }
             }
         }
         
