@@ -38,6 +38,8 @@ function loadBaseSchema(modelName) {
         InventoryBlockRoom: require('../db/inventoryBlocks').schema,
         ReportSnapshot: require('../db/reports/reportSnapshot').schema,
         Promotion: require('../db/promotion').schema,
+        MaintenanceLog: require('../db/housekeeping/maintenanceLog').schema,
+        HousekeepingMessage: require('../db/housekeeping/message').schema,
     };
 
     const schema = schemaMap[modelName];
@@ -86,6 +88,8 @@ function registerModels(connection) {
         'ServiceFee',
         'ReportSnapshot',
         'Promotion',
+        'MaintenanceLog',
+        'HousekeepingMessage',
     ].forEach((name) => {
         if (!connection.models[name]) {
             const baseSchema = loadBaseSchema(name);

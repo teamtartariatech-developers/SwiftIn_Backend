@@ -1,4 +1,5 @@
 const express = require('express');
+const http = require('http');
 const app = express();
 const dotenv = require('dotenv');
 const connectDB = require('./db/dbcon');
@@ -16,6 +17,8 @@ const folios = require('./routes/billingFinance/folios');
 const auth = require('./routes/auth/auth');
 const reports = require('./routes/reports/reports');
 const mailer = require('./routes/mailer');
+const housekeeping = require('./routes/housekeeping');
+const { initHousekeepingWebsocket } = require('./services/housekeepingWebsocket');
 
 app.use(express.json());
 
@@ -52,11 +55,15 @@ app.use('/api/billingfinance/folios', folios);
 app.use('/api/auth', auth);
 app.use('/api/reports', reports);
 app.use('/api/mailer', mailer);
+app.use('/api/housekeeping', housekeeping);
 // app.use('/frontoffice', frontRouter);
 // app.use('/distribution', distRouter);
 
 
+const server = http.createServer(app);
+initHousekeepingWebsocket(server);
+
 const port = process.env.Port || 3000;
-app.listen(port, () => { 
+server.listen(port, () => { 
     console.log(`Server is listening on port ${port}`);
 } );

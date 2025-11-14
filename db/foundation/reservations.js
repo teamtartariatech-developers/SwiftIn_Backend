@@ -21,6 +21,15 @@ const reservations = new mongoose.Schema({
     totalGuest: Number,
     totalAmount: Number,
     payedAmount: Number,
+    mealPlan: {
+        type: String,
+        enum: ['EP', 'CP', 'MAP', 'AP'],
+        default: 'EP'
+    },
+    mealPlanAmount: { type: Number, default: 0 },
+    mealPlanRate: { type: Number, default: 0 },
+    mealPlanGuestCount: { type: Number, default: 0 },
+    mealPlanNights: { type: Number, default: 0 },
     paymentMethod: String,
     Source: String,
     adhaarNumber: String,
