@@ -450,4 +450,106 @@ router.delete('/fees/:id', async (req, res) => {
   }
 });
 
+// ===== AI SETTINGS ROUTES =====
+
+// Get AI settings
+router.get('/ai', async (req, res) => {
+  try {
+    const propertyId = getPropertyId(req);
+    const AISettings = getModel(req, 'AISettings');
+    let aiSettings = await AISettings.findOne({ property: propertyId });
+    
+    // If no AI settings exist, create default one
+    if (!aiSettings) {
+      aiSettings = new AISettings({
+        language: 'english',
+        property: propertyId
+      });
+      await aiSettings.save();
+    }
+    
+    res.status(200).json(aiSettings);
+  } catch (error) {
+    console.error('Error fetching AI settings:', error);
+    res.status(500).json({ message: 'Server error fetching AI settings.' });
+  }
+});
+
+// Update AI settings
+router.put('/ai', async (req, res) => {
+  try {
+    const { language } = req.body;
+    
+    if (!language) {
+      return res.status(400).json({ message: 'Language is required.' });
+    }
+    
+    const validLanguages = [
+      'english',
+      'hindi',
+      'hindi-roman',
+      'bengali',
+      'bengali-roman',
+      'telugu',
+      'telugu-roman',
+      'marathi',
+      'marathi-roman',
+      'tamil',
+      'tamil-roman',
+      'gujarati',
+      'gujarati-roman',
+      'kannada',
+      'kannada-roman',
+      'malayalam',
+      'malayalam-roman',
+      'odia',
+      'odia-roman',
+      'punjabi',
+      'punjabi-roman',
+      'assamese',
+      'assamese-roman',
+      'urdu',
+      'urdu-roman'
+    ];
+    
+    if (!validLanguages.includes(language)) {
+      return res.status(400).json({ 
+        message: `Invalid language. Must be one of: ${validLanguages.join(', ')}` 
+      });
+    }
+    
+    const propertyId = getPropertyId(req);
+    const AISettings = getModel(req, 'AISettings');
+    
+    const existingSettings = await AISettings.findOne({ property: propertyId });
+    
+    if (existingSettings) {
+      const updatedSettings = await AISettings.findOneAndUpdate(
+        { _id: existingSettings._id, property: propertyId },
+        { language },
+        { new: true, runValidators: true }
+      );
+      
+      return res.status(200).json({
+        message: 'AI settings updated successfully',
+        aiSettings: updatedSettings,
+      });
+    }
+    
+    const newSettings = new AISettings({
+      language,
+      property: propertyId,
+    });
+    await newSettings.save();
+    
+    res.status(201).json({
+      message: 'AI settings created successfully',
+      aiSettings: newSettings,
+    });
+  } catch (error) {
+    console.error('Error updating AI settings:', error);
+    res.status(500).json({ message: 'Server error updating AI settings.' });
+  }
+});
+
 module.exports = router;

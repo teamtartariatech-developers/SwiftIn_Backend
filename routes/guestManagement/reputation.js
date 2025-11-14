@@ -1,5 +1,6 @@
 const express = require('express');
 const bodyParser = require('body-parser');
+const axios = require('axios');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
 
 const router = express.Router();
@@ -130,13 +131,14 @@ router.get('/:id', async (req, res) => {
 
 // Create new review
 router.post('/', async (req, res) => {
+    
     try {
-        const { name, review, rating, source, sentiment } = req.body;
+        const { name, review, rating, source } = req.body;
         
         // Validation
-        if (!name || !review || !rating || !source || !sentiment) {
+        if (!name || !review || !rating || !source) {
             return res.status(400).json({ 
-                message: "All fields (name, review, rating, source, sentiment) are required." 
+                message: "All fields (name, review, rating, source) are required." 
             });
         }
         
@@ -153,10 +155,46 @@ router.post('/', async (req, res) => {
             });
         }
         
-        const validSentiments = ['positive', 'neutral', 'negative'];
-        if (!validSentiments.includes(sentiment)) {
-            return res.status(400).json({ 
-                message: "Invalid sentiment. Must be one of: " + validSentiments.join(', ') 
+        // Get sentiment from AI API
+        const aiApiBaseUrl = process.env.AI_API_BASEURL;
+        if (!aiApiBaseUrl) {
+            return res.status(500).json({ 
+                message: "AI_API_BASEURL environment variable is not configured." 
+            });
+        }
+        
+        let sentiment;
+        try {
+            const aiResponse = await axios.post(
+                `${aiApiBaseUrl}/inAppAI/sentimentAnalysis`,
+                { text: review },
+                {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+            
+            // Extract sentiment from response
+            sentiment = aiResponse.data.sentiment?.toLowerCase();
+            
+            
+            // Validate sentiment value
+            const validSentiments = ['positive', 'neutral', 'negative'];
+            if (!sentiment || !validSentiments.includes(sentiment)) {
+                console.error('Invalid sentiment received from AI API:', sentiment);
+                sentiment = 'neutral';
+            }
+            else{
+                res.status(200).json({
+                    message: "Sentiment analyzed successfully.",
+                    sentiment: sentiment
+                });
+            }
+        } catch (aiError) {
+            console.error('Error calling AI API for sentiment analysis:', aiError);
+            return res.status(502).json({ 
+                message: "Failed to analyze sentiment. AI service unavailable." 
             });
         }
         
@@ -282,6 +320,69 @@ router.get('/stats/overview', async (req, res) => {
     } catch (error) {
         console.error('Error fetching review statistics:', error);
         res.status(500).json({ message: "Server error fetching review statistics." });
+    }
+});
+
+// Get reviews summary using AI
+router.post('/summarize', async (req, res) => {
+    try {
+        const { reviews } = req.body;
+        
+        if (!reviews || !Array.isArray(reviews) || reviews.length === 0) {
+            return res.status(400).json({ 
+                message: "Reviews array is required and must not be empty." 
+            });
+        }
+        
+        // Get language from AI settings
+        const propertyId = getPropertyId(req);
+        const AISettings = getModel(req, 'AISettings');
+        let aiSettings = await AISettings.findOne({ property: propertyId });
+        
+        // Default to english if no settings found
+        const language = aiSettings?.language || 'english';
+        
+        // Get sentiment from AI API
+        const aiApiBaseUrl = process.env.AI_API_BASEURL;
+        if (!aiApiBaseUrl) {
+            return res.status(500).json({ 
+                message: "AI_API_BASEURL environment variable is not configured." 
+            });
+        }
+        
+        try {
+            const aiResponse = await axios.post(
+                `${aiApiBaseUrl}/inAppAI/reviewsSummarizer`,
+                { 
+                    reviews: reviews,
+                    language: language
+                },
+                {
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+            
+            // Extract summary from response
+            const summary = aiResponse.data.summary;
+            
+            if (!summary) {
+                return res.status(502).json({ 
+                    message: "AI API did not return a summary." 
+                });
+            }
+            
+            return res.status(200).json({ summary });
+        } catch (aiError) {
+            console.error('Error calling AI API for reviews summarizer:', aiError);
+            return res.status(502).json({ 
+                message: "Failed to generate summary. AI service unavailable." 
+            });
+        }
+    } catch (error) {
+        console.error('Error in reviews summarizer:', error);
+        res.status(500).json({ message: "Server error generating summary." });
     }
 });
 
