@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const { validateAndSetDefaults, isValidObjectId } = require('../../utils/validation');
 
 router.use(express.json());
 router.use(authenticate);
@@ -12,23 +13,22 @@ const getPropertyId = (req) => req.tenant.property._id;
 
 router.get('/monthly', async (req, res) => {
     try {
-        const { month, year } = req.query;
+        // Validate query parameters
+        const querySchema = {
+            month: { type: 'number', required: true, min: 1, max: 12 },
+            year: { type: 'number', required: true, min: 2000, max: 2100 }
+        };
+
+        const validation = validateAndSetDefaults(req.query, querySchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { month: monthNum, year: yearNum } = validation.validated;
         const propertyId = getPropertyId(req);
         const RoomType = getModel(req, 'RoomType');
         const Reservations = getModel(req, 'Reservations');
         const InventoryBlock = getModel(req, 'InventoryBlock');
-        
-        if (!month || !year) {
-            return res.status(400).json({ message: "Month and year are required" });
-        }
-
-        const monthNum = parseInt(month);
-        const yearNum = parseInt(year);
-        
-        // Validate month (1-12)
-        if (monthNum < 1 || monthNum > 12) {
-            return res.status(400).json({ message: "Month must be between 1 and 12" });
-        }
 
         // Get all room types with their total inventory and pricing info
         const roomTypes = await RoomType.find(
@@ -184,15 +184,22 @@ router.get('/monthly', async (req, res) => {
 // Get real-time room availability by room type
 router.get('/availability', async (req, res) => {
     try {
-        const { roomTypeId, date } = req.query;
+        // Validate query parameters
+        const querySchema = {
+            roomTypeId: { type: 'string', required: true, isObjectId: true },
+            date: { type: 'string', isDate: true }
+        };
+
+        const validation = validateAndSetDefaults(req.query, querySchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { roomTypeId, date } = validation.validated;
         const propertyId = getPropertyId(req);
         const RoomType = getModel(req, 'RoomType');
         const Rooms = getModel(req, 'Rooms');
         const Reservations = getModel(req, 'Reservations');
-        
-        if (!roomTypeId) {
-            return res.status(400).json({ message: "Room type ID is required" });
-        }
 
         // Get room type details
         const roomType = await RoomType.findOne({ _id: roomTypeId, property: propertyId });
@@ -359,22 +366,23 @@ router.get('/room-types-availability', async (req, res) => {
 // Block inventory for specific dates
 router.post('/block-inventory', async (req, res) => {
     try {
-        const { roomTypeId, dates, blockedInventory, reason } = req.body;
+        // Validate and set defaults
+        const blockSchema = {
+            roomTypeId: { type: 'string', required: true, isObjectId: true },
+            dates: { isArray: true, required: true, custom: (val) => Array.isArray(val) && val.length > 0 || 'Dates array must not be empty' },
+            blockedInventory: { type: 'number', required: true, min: 0 },
+            reason: { type: 'string', default: 'Manual block' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, blockSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { roomTypeId, dates, blockedInventory, reason } = validation.validated;
         const propertyId = getPropertyId(req);
         const RoomType = getModel(req, 'RoomType');
         const InventoryBlock = getModel(req, 'InventoryBlock');
-
-        if (!roomTypeId || !Array.isArray(dates) || dates.length === 0 || blockedInventory === undefined) {
-            return res.status(400).json({ message: "Missing or invalid required fields (roomTypeId, dates array, blockedInventory)." });
-        }
-
-        if (blockedInventory < 0) {
-            return res.status(400).json({ message: "Blocked inventory cannot be negative." });
-        }
-
-        if (!mongoose.Types.ObjectId.isValid(roomTypeId)) {
-            return res.status(400).json({ message: "Invalid Room Type ID format." });
-        }
 
         // Verify room type exists
         const roomType = await RoomType.findOne({ _id: roomTypeId, property: propertyId });
@@ -434,17 +442,21 @@ router.post('/block-inventory', async (req, res) => {
 // Get inventory blocks for a specific date range
 router.get('/inventory-blocks', async (req, res) => {
     try {
-        const { roomTypeId, startDate, endDate } = req.query;
+        // Validate query parameters
+        const querySchema = {
+            roomTypeId: { type: 'string', required: true, isObjectId: true },
+            startDate: { type: 'string', isDate: true },
+            endDate: { type: 'string', isDate: true }
+        };
+
+        const validation = validateAndSetDefaults(req.query, querySchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { roomTypeId, startDate, endDate } = validation.validated;
         const propertyId = getPropertyId(req);
         const InventoryBlock = getModel(req, 'InventoryBlock');
-
-        if (!roomTypeId) {
-            return res.status(400).json({ message: "Room type ID is required." });
-        }
-
-        if (!mongoose.Types.ObjectId.isValid(roomTypeId)) {
-            return res.status(400).json({ message: "Invalid Room Type ID format." });
-        }
 
         // Build query
         const query = { roomType: roomTypeId, property: propertyId };
@@ -475,17 +487,20 @@ router.get('/inventory-blocks', async (req, res) => {
 // Remove inventory blocks
 router.delete('/unblock-inventory', async (req, res) => {
     try {
-        const { roomTypeId, dates } = req.body;
+        // Validate and set defaults
+        const unblockSchema = {
+            roomTypeId: { type: 'string', required: true, isObjectId: true },
+            dates: { isArray: true, required: true, custom: (val) => Array.isArray(val) && val.length > 0 || 'Dates array must not be empty' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, unblockSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { roomTypeId, dates } = validation.validated;
         const propertyId = getPropertyId(req);
         const InventoryBlock = getModel(req, 'InventoryBlock');
-
-        if (!roomTypeId || !Array.isArray(dates) || dates.length === 0) {
-            return res.status(400).json({ message: "Missing or invalid required fields (roomTypeId, dates array)." });
-        }
-
-        if (!mongoose.Types.ObjectId.isValid(roomTypeId)) {
-            return res.status(400).json({ message: "Invalid Room Type ID format." });
-        }
 
         // Convert dates to Date objects
         const dateObjects = [];

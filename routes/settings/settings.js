@@ -1,6 +1,7 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const { validateAndSetDefaults, isValidEmail, isValidObjectId } = require('../../utils/validation');
 const {
   hashPassword,
   encryptPassword,
@@ -87,7 +88,30 @@ router.get('/property', async (req, res) => {
 // Update property details
 router.put('/property', async (req, res) => {
   try {
-    const updateData = { ...req.body };
+    // Validate update fields (all optional)
+    const propertySchema = {
+      propertyName: { type: 'string' },
+      address: { type: 'string' },
+      phone: { type: 'string' },
+      email: { type: 'string', custom: (val) => !val || isValidEmail(val) || 'Invalid email format' },
+      website: { type: 'string' },
+      currency: { type: 'string' },
+      timezone: { type: 'string' },
+      gstin: { type: 'string' },
+      checkInTime: { type: 'string' },
+      checkOutTime: { type: 'string' },
+      cancellationPolicy: { type: 'string' },
+      generalPolicies: { type: 'string' },
+      gstRate: { type: 'number', min: 0, max: 100 },
+      serviceChargeRate: { type: 'number', min: 0, max: 100 }
+    };
+
+    const validation = validateAndSetDefaults(req.body, propertySchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
+    const updateData = { ...validation.validated };
     delete updateData.property;
 
     const propertyId = getPropertyId(req);
@@ -147,6 +171,22 @@ router.get('/integrations/email', async (req, res) => {
 
 router.post('/integrations/email', async (req, res) => {
   try {
+    // Validate and set defaults
+    const emailSchema = {
+      fromName: { type: 'string', required: true },
+      fromEmail: { type: 'string', required: true, custom: (val) => isValidEmail(val) || 'Invalid email format' },
+      smtpHost: { type: 'string', required: true },
+      smtpPort: { type: 'number', required: true, min: 1, max: 65535, custom: (val) => Number.isInteger(val) || 'smtpPort must be an integer' },
+      secure: { type: 'boolean' },
+      authUser: { type: 'string', required: true },
+      password: { type: 'string' }
+    };
+
+    const validation = validateAndSetDefaults(req.body || {}, emailSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
     const {
       fromName,
       fromEmail,
@@ -155,18 +195,9 @@ router.post('/integrations/email', async (req, res) => {
       secure,
       authUser,
       password,
-    } = req.body || {};
+    } = validation.validated;
 
-    if (!fromName || !fromEmail || !smtpHost || !smtpPort || !authUser) {
-      return res
-        .status(400)
-        .json({ message: 'fromName, fromEmail, smtpHost, smtpPort, and authUser are required.' });
-    }
-
-    const port = Number(smtpPort);
-    if (!Number.isInteger(port) || port <= 0) {
-      return res.status(400).json({ message: 'smtpPort must be a positive integer.' });
-    }
+    const port = smtpPort; // Already validated as integer
 
     const EmailIntegration = getModel(req, 'EmailIntegration');
     const propertyId = getPropertyId(req);
@@ -292,9 +323,23 @@ router.get('/taxes', async (req, res) => {
 // Create tax rule
 router.post('/taxes', async (req, res) => {
   try {
+    // Validate and set defaults
+    const taxSchema = {
+      name: { type: 'string', required: true },
+      rate: { type: 'number', required: true, min: 0 },
+      isPercentage: { type: 'boolean', default: true },
+      applicableOn: { type: 'string', default: 'total_amount', enum: ['room_rate', 'total_amount', 'all'] },
+      isActive: { type: 'boolean', default: true }
+    };
+
+    const validation = validateAndSetDefaults(req.body, taxSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
     const TaxRule = getModel(req, 'TaxRule');
     const newTaxRule = new TaxRule({
-      ...req.body,
+      ...validation.validated,
       property: getPropertyId(req),
     });
     await newTaxRule.save();
@@ -312,7 +357,27 @@ router.post('/taxes', async (req, res) => {
 router.put('/taxes/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = { ...req.body };
+    
+    // Validate ObjectId
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid tax rule ID format' });
+    }
+
+    // Validate update fields
+    const updateSchema = {
+      name: { type: 'string' },
+      rate: { type: 'number', min: 0 },
+      isPercentage: { type: 'boolean' },
+      applicableOn: { type: 'string', enum: ['room_rate', 'total_amount', 'all'] },
+      isActive: { type: 'boolean' }
+    };
+
+    const validation = validateAndSetDefaults(req.body, updateSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
+    const updateData = { ...validation.validated };
     delete updateData.property;
     const TaxRule = getModel(req, 'TaxRule');
 
@@ -340,6 +405,12 @@ router.put('/taxes/:id', async (req, res) => {
 router.delete('/taxes/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    
+    // Validate ObjectId
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid tax rule ID format' });
+    }
+    
     const TaxRule = getModel(req, 'TaxRule');
     const updatedTaxRule = await TaxRule.findOneAndUpdate(
       { _id: id, property: getPropertyId(req) },
@@ -381,9 +452,23 @@ router.get('/fees', async (req, res) => {
 // Create service fee
 router.post('/fees', async (req, res) => {
   try {
+    // Validate and set defaults
+    const feeSchema = {
+      name: { type: 'string', required: true },
+      amount: { type: 'number', required: true, min: 0 },
+      isPercentage: { type: 'boolean', default: false },
+      applicableOn: { type: 'string', required: true, enum: ['per_night', 'per_booking', 'per_person', 'per_person_per_night', 'room_rate', 'total_amount'] },
+      isActive: { type: 'boolean', default: true }
+    };
+
+    const validation = validateAndSetDefaults(req.body, feeSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
     const ServiceFee = getModel(req, 'ServiceFee');
     const newServiceFee = new ServiceFee({
-      ...req.body,
+      ...validation.validated,
       property: getPropertyId(req),
     });
     await newServiceFee.save();
@@ -401,7 +486,27 @@ router.post('/fees', async (req, res) => {
 router.put('/fees/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const updateData = { ...req.body };
+    
+    // Validate ObjectId
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid service fee ID format' });
+    }
+
+    // Validate update fields
+    const updateSchema = {
+      name: { type: 'string' },
+      amount: { type: 'number', min: 0 },
+      isPercentage: { type: 'boolean' },
+      applicableOn: { type: 'string', enum: ['per_night', 'per_booking', 'per_person', 'per_person_per_night', 'room_rate', 'total_amount'] },
+      isActive: { type: 'boolean' }
+    };
+
+    const validation = validateAndSetDefaults(req.body, updateSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
+    const updateData = { ...validation.validated };
     delete updateData.property;
     const ServiceFee = getModel(req, 'ServiceFee');
 
@@ -429,6 +534,12 @@ router.put('/fees/:id', async (req, res) => {
 router.delete('/fees/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    
+    // Validate ObjectId
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid service fee ID format' });
+    }
+    
     const ServiceFee = getModel(req, 'ServiceFee');
     const updatedServiceFee = await ServiceFee.findOneAndUpdate(
       { _id: id, property: getPropertyId(req) },
@@ -478,12 +589,7 @@ router.get('/ai', async (req, res) => {
 // Update AI settings
 router.put('/ai', async (req, res) => {
   try {
-    const { language } = req.body;
-    
-    if (!language) {
-      return res.status(400).json({ message: 'Language is required.' });
-    }
-    
+    // Validate and set defaults
     const validLanguages = [
       'english',
       'hindi',
@@ -511,22 +617,37 @@ router.put('/ai', async (req, res) => {
       'urdu',
       'urdu-roman'
     ];
-    
-    if (!validLanguages.includes(language)) {
-      return res.status(400).json({ 
-        message: `Invalid language. Must be one of: ${validLanguages.join(', ')}` 
-      });
+
+    const aiSchema = {
+      language: { type: 'string', required: true, enum: validLanguages },
+      model: { type: 'string' },
+      temperature: { type: 'number', min: 0, max: 2 },
+      maxTokens: { type: 'number', min: 1, max: 4000 },
+      enabled: { type: 'boolean', default: true }
+    };
+
+    const validation = validateAndSetDefaults(req.body, aiSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
     }
+
+    const { language, model, temperature, maxTokens, enabled } = validation.validated;
     
     const propertyId = getPropertyId(req);
     const AISettings = getModel(req, 'AISettings');
     
     const existingSettings = await AISettings.findOne({ property: propertyId });
     
+    const updateData = { language };
+    if (model !== undefined) updateData.model = model;
+    if (temperature !== undefined) updateData.temperature = temperature;
+    if (maxTokens !== undefined) updateData.maxTokens = maxTokens;
+    if (enabled !== undefined) updateData.enabled = enabled;
+
     if (existingSettings) {
       const updatedSettings = await AISettings.findOneAndUpdate(
         { _id: existingSettings._id, property: propertyId },
-        { language },
+        updateData,
         { new: true, runValidators: true }
       );
       
@@ -537,7 +658,7 @@ router.put('/ai', async (req, res) => {
     }
     
     const newSettings = new AISettings({
-      language,
+      ...updateData,
       property: propertyId,
     });
     await newSettings.save();

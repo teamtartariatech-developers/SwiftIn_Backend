@@ -1,6 +1,7 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const { validateAndSetDefaults, validatePagination, normalizePaymentMethod, isValidObjectId } = require('../../utils/validation');
 
 const router = express.Router();
 router.use(bodyParser.json());
@@ -10,32 +11,10 @@ router.use(requireModuleAccess('billing-finance'));
 const getModel = (req, name) => req.tenant.models[name];
 const getPropertyId = (req) => req.tenant.property._id;
 
-// Helper function to normalize payment method to match enum values
-const normalizePaymentMethod = (method) => {
-  if (!method) return 'Cash';
-  
-  const methodLower = method.toLowerCase().trim();
-  const validMethods = {
-    'cash': 'Cash',
-    'credit card': 'Credit Card',
-    'creditcard': 'Credit Card',
-    'debit card': 'Debit Card',
-    'debitcard': 'Debit Card',
-    'upi': 'UPI',
-    'bank transfer': 'Bank Transfer',
-    'banktransfer': 'Bank Transfer',
-    'wallet': 'Wallet',
-    'cheque': 'Cheque',
-    'check': 'Cheque'
-  };
-  
-  return validMethods[methodLower] || 'Cash';
-};
-
 // Get all active folios
 router.get('/', async (req, res) => {
     try {
-        const { search } = req.query;
+        const { search } = validatePagination(req.query);
         const propertyId = getPropertyId(req);
         const GuestFolio = getModel(req, 'GuestFolio');
         let query = { status: 'active', property: propertyId };
@@ -62,9 +41,16 @@ router.get('/', async (req, res) => {
 // Get a single folio by ID
 router.get('/:id', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid folio ID format' });
+        }
+        
         const GuestFolio = getModel(req, 'GuestFolio');
         const folio = await GuestFolio.findOne({
-            _id: req.params.id,
+            _id: id,
             property: getPropertyId(req),
         }).populate('reservationId');
         
@@ -82,15 +68,25 @@ router.get('/:id', async (req, res) => {
 // Create a new folio (automatically called when reservation is created or checked in)
 router.post('/', async (req, res) => {
     try {
-        const { reservationId, roomNumber, roomNumbers, payedAmount: overridePayedAmount, paymentMethod: overridePaymentMethod } = req.body;
+        // Validate and set defaults
+        const folioSchema = {
+            reservationId: { type: 'string', required: true, isObjectId: true },
+            roomNumber: { type: 'string', default: '' },
+            roomNumbers: { isArray: true, default: [] },
+            payedAmount: { type: 'number', default: 0, min: 0 },
+            paymentMethod: { type: 'string', default: 'Cash' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, folioSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { reservationId, roomNumber, roomNumbers, payedAmount: overridePayedAmount, paymentMethod: overridePaymentMethod } = validation.validated;
         const propertyId = getPropertyId(req);
         const GuestFolio = getModel(req, 'GuestFolio');
         const Reservations = getModel(req, 'Reservations');
         const Rooms = getModel(req, 'Rooms');
-        
-        if (!reservationId) {
-            return res.status(400).json({ message: "Reservation ID is required." });
-        }
         
         // Check if folio already exists for this reservation
         const existingFolio = await GuestFolio.findOne({ 
@@ -358,16 +354,46 @@ router.post('/', async (req, res) => {
 // Add a charge item to folio
 router.post('/:id/charges', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid folio ID format' });
+        }
+        
+        // Validate charge fields
+        const chargeSchema = {
+            description: { type: 'string', required: true },
+            date: { type: 'string', isDate: true, default: () => new Date() },
+            amount: { type: 'number', required: true, min: 0 },
+            department: { type: 'string', default: 'Other' },
+            quantity: { type: 'number', default: 1, min: 1 },
+            unitPrice: { type: 'number', min: 0 },
+            tax: { type: 'number', default: 0, min: 0 },
+            discount: { type: 'number', default: 0, min: 0 },
+            notes: { type: 'string', default: '' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, chargeSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        // Set unitPrice to amount if not provided
+        if (!validation.validated.unitPrice) {
+            validation.validated.unitPrice = validation.validated.amount;
+        }
+
         const GuestFolio = getModel(req, 'GuestFolio');
         const folio = await GuestFolio.findOne({
-            _id: req.params.id,
+            _id: id,
             property: getPropertyId(req),
         });
         if (!folio) {
             return res.status(404).json({ message: "Folio not found." });
         }
         
-        const { description, date, amount, department, quantity, unitPrice, tax, discount, notes } = req.body;
+        const { description, date, amount, department, quantity, unitPrice, tax, discount, notes } = validation.validated;
         
         folio.items.push({
             description,
@@ -394,16 +420,40 @@ router.post('/:id/charges', async (req, res) => {
 // Add a payment to folio
 router.post('/:id/payments', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid folio ID format' });
+        }
+        
+        // Validate payment fields
+        const paymentSchema = {
+            date: { type: 'string', isDate: true, default: () => new Date() },
+            method: { type: 'string', default: 'Cash' },
+            amount: { type: 'number', required: true, min: 0 },
+            transactionId: { type: 'string', default: '' },
+            notes: { type: 'string', default: '' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, paymentSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        // Normalize payment method
+        validation.validated.method = normalizePaymentMethod(validation.validated.method);
+
         const GuestFolio = getModel(req, 'GuestFolio');
         const folio = await GuestFolio.findOne({
-            _id: req.params.id,
+            _id: id,
             property: getPropertyId(req),
         });
         if (!folio) {
             return res.status(404).json({ message: "Folio not found." });
         }
         
-        const { date, method, amount, transactionId, notes } = req.body;
+        const { date, method, amount, transactionId, notes } = validation.validated;
         
         folio.payments.push({
             date: date ? new Date(date) : new Date(),
@@ -426,12 +476,34 @@ router.post('/:id/payments', async (req, res) => {
 // Update folio
 router.put('/:id', async (req, res) => {
     try {
-        const updates = { ...req.body };
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid folio ID format' });
+        }
+
+        // Validate update fields (all optional)
+        const updateSchema = {
+            status: { type: 'string', enum: ['active', 'archived'] },
+            guestName: { type: 'string' },
+            guestEmail: { type: 'string' },
+            guestPhone: { type: 'string' },
+            roomNumber: { type: 'string' },
+            roomNumbers: { isArray: true }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const updates = { ...validation.validated };
         delete updates.property;
 
         const GuestFolio = getModel(req, 'GuestFolio');
         const folio = await GuestFolio.findOneAndUpdate(
-            { _id: req.params.id, property: getPropertyId(req) },
+            { _id: id, property: getPropertyId(req) },
             updates,
             { new: true }
         );
@@ -452,13 +524,20 @@ router.put('/:id', async (req, res) => {
 // Settle and checkout - Archive folio to permanent bills
 router.post('/:id/checkout', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid folio ID format' });
+        }
+        
         const propertyId = getPropertyId(req);
         const GuestFolio = getModel(req, 'GuestFolio');
         const Bill = getModel(req, 'Bill');
         const Reservations = getModel(req, 'Reservations');
 
         const folio = await GuestFolio.findOne({
-            _id: req.params.id,
+            _id: id,
             property: propertyId,
         });
         if (!folio) {
@@ -526,7 +605,7 @@ router.post('/:id/checkout', async (req, res) => {
 // Get all permanent bills (for historical records) - MUST be before /bills/:id route
 router.get('/bills/all', async (req, res) => {
     try {
-        const { search, page = 1, limit = 50 } = req.query;
+        const { search, page, limit } = validatePagination({ ...req.query, limit: req.query.limit || 50 });
         const propertyId = getPropertyId(req);
         const Bill = getModel(req, 'Bill');
         let query = { property: propertyId };

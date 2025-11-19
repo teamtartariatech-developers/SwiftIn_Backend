@@ -1,6 +1,7 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../middleware/auth');
+const { validateAndSetDefaults, validateDateRange, isValidObjectId } = require('../utils/validation');
 
 const router = express.Router();
 router.use(bodyParser.json());
@@ -11,23 +12,30 @@ const getPropertyId = (req) => req.tenant.property._id;
 
 router.post('/check-availability', requireModuleAccess('front-office'), async (req, res) => {
     try {
+        // Validate and set defaults
+        const availabilitySchema = {
+            roomTypeId: { type: 'string', required: true, isObjectId: true },
+            checkInDate: { type: 'string', required: true, isDate: true },
+            checkOutDate: { type: 'string', required: true, isDate: true }
+        };
+
+        const validation = validateAndSetDefaults(req.body, availabilitySchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        // Validate date range
+        const dateValidation = validateDateRange(validation.validated.checkInDate, validation.validated.checkOutDate);
+        if (!dateValidation.isValid) {
+            return res.status(400).json({ message: dateValidation.errors.join(', ') });
+        }
+
         const propertyId = getPropertyId(req);
         const RoomType = getModel(req, 'RoomType');
         const Reservation = getModel(req, 'Reservations');
-        // Remove numberOfRoomsRequested from destructuring
-        const { roomTypeId, checkInDate, checkOutDate } = req.body;
-
-        // --- Input Validation ---
-        // Remove validation for numberOfRoomsRequested
-        if (!roomTypeId || !checkInDate || !checkOutDate) {
-            return res.status(400).json({ message: "Missing required fields (roomTypeId, checkInDate, checkOutDate)." });
-        }
-        // ... (rest of validation: ObjectId, date formats, date range) ...
-        const requestedCheckIn = new Date(checkInDate + 'T00:00:00.000Z');
-        const requestedCheckOut = new Date(checkOutDate + 'T00:00:00.000Z');
-        if (isNaN(requestedCheckIn.getTime()) || isNaN(requestedCheckOut.getTime()) || requestedCheckIn >= requestedCheckOut) {
-             return res.status(400).json({ message: "Invalid date format or range." });
-        }
+        
+        const requestedCheckIn = dateValidation.checkIn;
+        const requestedCheckOut = dateValidation.checkOut;
 
         // --- Get Total Inventory ---
         const roomType = await RoomType.findOne({ _id: roomTypeId, property: propertyId });
@@ -98,7 +106,26 @@ router.post('/check-availability', requireModuleAccess('front-office'), async (r
 router.put('/Rooms/:id', requireModuleAccess('settings'), async (req, res) => {
     try {
         const { id } = req.params;
-        const updates = { ...req.body };
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid room ID format' });
+        }
+
+        // Validate update fields
+        const updateSchema = {
+            roomNumber: { type: 'string' },
+            roomType: { type: 'string', isObjectId: true },
+            status: { type: 'string', enum: ['clean', 'dirty', 'occupied', 'maintenance'] },
+            floor: { type: 'number', min: 0 }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const updates = { ...validation.validated };
         delete updates.property;
 
         const Rooms = getModel(req, 'Rooms');
@@ -131,6 +158,11 @@ router.get('/getRoomsByType/:roomTypeId', async (req, res) => {
     try{
         const { roomTypeId } = req.params;
         
+        // Validate ObjectId
+        if (!isValidObjectId(roomTypeId)) {
+            return res.status(400).json({ message: 'Invalid room type ID format' });
+        }
+        
         const Rooms = getModel(req, 'Rooms');
         const rooms = await Rooms.find({ roomType: roomTypeId, property: getPropertyId(req) });
         
@@ -145,6 +177,12 @@ router.get('/getRoomsByType/:roomTypeId', async (req, res) => {
 router.get('/getRoom/:roomId', async (req, res) => {
     try{
         const { roomId } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(roomId)) {
+            return res.status(400).json({ message: 'Invalid room ID format' });
+        }
+        
         const Rooms = getModel(req, 'Rooms');
         const room = await Rooms.findOne({ _id: roomId, property: getPropertyId(req) });
         if (!room) {

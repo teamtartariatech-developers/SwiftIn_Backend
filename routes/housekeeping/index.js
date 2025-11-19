@@ -2,6 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
 const { broadcastHousekeepingMessage } = require('../../services/housekeepingWebsocket');
+const { validateAndSetDefaults, isValidObjectId } = require('../../utils/validation');
 
 const router = express.Router();
 
@@ -25,11 +26,15 @@ router.get('/maintenance', async (req, res) => {
   try {
     const MaintenanceLog = getModel(req, 'MaintenanceLog');
     const propertyId = getPropertyId(req);
-    const { status } = req.query;
+    const { status = '' } = req.query;
 
     const filter = { property: propertyId };
     if (status && status !== 'all') {
-      filter.status = status;
+      // Validate status enum
+      const validStatuses = ['open', 'in-progress', 'resolved', 'cancelled'];
+      if (validStatuses.includes(status)) {
+        filter.status = status;
+      }
     }
 
     const logs = await MaintenanceLog.find(filter).sort({ createdAt: -1 }).lean();
@@ -42,10 +47,20 @@ router.get('/maintenance', async (req, res) => {
 
 router.post('/maintenance', async (req, res) => {
   try {
-    const { location, description, priority = 'medium', notes } = req.body;
-    if (!location || !description) {
-      return res.status(400).json({ message: 'Location and description are required.' });
+    // Validate and set defaults
+    const maintenanceSchema = {
+      location: { type: 'string', required: true },
+      description: { type: 'string', required: true },
+      priority: { type: 'string', default: 'medium', enum: ['low', 'medium', 'high', 'urgent'] },
+      notes: { type: 'string', default: '' }
+    };
+
+    const validation = validateAndSetDefaults(req.body, maintenanceSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
     }
+
+    const { location, description, priority, notes } = validation.validated;
 
     const MaintenanceLog = getModel(req, 'MaintenanceLog');
     const propertyId = getPropertyId(req);
@@ -87,7 +102,26 @@ router.post('/maintenance', async (req, res) => {
 router.put('/maintenance/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, priority, notes, assignedTo } = req.body;
+    
+    // Validate ObjectId
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid maintenance log ID format' });
+    }
+
+    // Validate update fields
+    const updateSchema = {
+      status: { type: 'string', enum: ['open', 'in-progress', 'resolved', 'cancelled'] },
+      priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] },
+      notes: { type: 'string' },
+      assignedTo: { type: 'object' }
+    };
+
+    const validation = validateAndSetDefaults(req.body, updateSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
+    const { status, priority, notes, assignedTo } = validation.validated;
     const propertyId = getPropertyId(req);
     const MaintenanceLog = getModel(req, 'MaintenanceLog');
 
@@ -117,7 +151,7 @@ router.put('/maintenance/:id', async (req, res) => {
       update.priority = priority;
     }
 
-    if (typeof notes === 'string') {
+    if (notes) {
       update.notes = notes;
       historyEntry.note = notes;
       hasHistoryChange = true;
@@ -167,6 +201,12 @@ router.put('/maintenance/:id', async (req, res) => {
 router.get('/maintenance/:id', async (req, res) => {
   try {
     const { id } = req.params;
+    
+    // Validate ObjectId
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid maintenance log ID format' });
+    }
+    
     const propertyId = getPropertyId(req);
     const MaintenanceLog = getModel(req, 'MaintenanceLog');
     const log = await MaintenanceLog.findOne({ _id: id, property: propertyId });
@@ -182,9 +222,19 @@ router.get('/maintenance/:id', async (req, res) => {
 
 router.get('/messages', async (req, res) => {
   try {
+    // Validate query parameters
+    const querySchema = {
+      limit: { type: 'number', default: 50, min: 1, max: 200 }
+    };
+
+    const validation = validateAndSetDefaults(req.query, querySchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
+    }
+
     const HousekeepingMessage = getModel(req, 'HousekeepingMessage');
     const propertyId = getPropertyId(req);
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const limit = validation.validated.limit;
 
     const messages = await HousekeepingMessage.find({ property: propertyId })
       .sort({ createdAt: -1 })
@@ -202,10 +252,17 @@ router.get('/messages', async (req, res) => {
 
 router.post('/messages', async (req, res) => {
   try {
-    const { text } = req.body;
-    if (!text || !text.trim()) {
-      return res.status(400).json({ message: 'Message text is required.' });
+    // Validate and set defaults
+    const messageSchema = {
+      text: { type: 'string', required: true, custom: (val) => val && val.trim().length > 0 || 'Message text is required and cannot be empty' }
+    };
+
+    const validation = validateAndSetDefaults(req.body, messageSchema);
+    if (!validation.isValid) {
+      return res.status(400).json({ message: validation.errors.join(', ') });
     }
+
+    const { text } = validation.validated;
 
     const HousekeepingMessage = getModel(req, 'HousekeepingMessage');
     const propertyId = getPropertyId(req);

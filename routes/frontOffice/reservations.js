@@ -14,31 +14,11 @@ const formatAddress = (address) => {
   return parts.filter(Boolean).join(', ');
 };
 
-// Helper function to normalize payment method to match enum values
-const normalizePaymentMethod = (method) => {
-  if (!method) return 'Cash';
-  
-  const methodLower = method.toLowerCase().trim();
-  const validMethods = {
-    'cash': 'Cash',
-    'credit card': 'Credit Card',
-    'creditcard': 'Credit Card',
-    'debit card': 'Debit Card',
-    'debitcard': 'Debit Card',
-    'upi': 'UPI',
-    'bank transfer': 'Bank Transfer',
-    'banktransfer': 'Bank Transfer',
-    'wallet': 'Wallet',
-    'cheque': 'Cheque',
-    'check': 'Cheque'
-  };
-  
-  return validMethods[methodLower] || 'Cash';
-};
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
 const emailService = require('../../services/emailService');
+const { validateAndSetDefaults, validatePagination, validateDateRange, normalizePaymentMethod, isValidObjectId, isValidEmail, isValidPhone } = require('../../utils/validation');
 
 const router = express.Router();
 router.use(bodyParser.json());
@@ -452,9 +432,64 @@ const sendReservationEmail = async (req, reservation) => {
 
 router.post('/', async (req, res) => {
     try {
+        // Validate and set defaults for reservation creation
+        const reservationSchema = {
+            guestName: { type: 'string', required: true },
+            guestEmail: { type: 'string', required: true, custom: (val) => isValidEmail(val) || 'Invalid email format' },
+            guestNumber: { type: 'string', required: true, custom: (val) => isValidPhone(val) || 'Invalid phone number' },
+            checkInDate: { type: 'string', required: true, isDate: true },
+            checkOutDate: { type: 'string', required: true, isDate: true },
+            roomType: { type: 'string', required: true, isObjectId: true },
+            numberOfRooms: { type: 'number', default: 1, min: 1 },
+            totalGuest: { type: 'number', required: true, min: 1 },
+            totalAmount: { type: 'number', default: 0, min: 0 },
+            payedAmount: { type: 'number', default: 0, min: 0 },
+            paymentMethod: { type: 'string', default: 'Cash' },
+            Source: { type: 'string', default: 'direct', enum: ['direct', 'booking.com', 'agoda', 'expedia', 'airbnb', 'phone', 'walk-in'] },
+            adhaarNumber: { type: 'string', default: '' },
+            status: { type: 'string', default: 'confirmed', enum: ['confirmed', 'checked-in', 'checked-out', 'cancelled'] },
+            mealPlan: { type: 'string', default: 'EP', enum: ['EP', 'CP', 'MAP', 'AP'] },
+            mealPlanAmount: { type: 'number', default: 0, min: 0 },
+            mealPlanGuestCount: { type: 'number', default: 0, min: 0 },
+            mealPlanNights: { type: 'number', default: 0, min: 0 },
+            mealPlanRate: { type: 'number', default: 0, min: 0 },
+            roomNumbers: { isArray: true, default: [] },
+            notes: { type: 'string', default: '' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, reservationSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        // Validate date range
+        const dateValidation = validateDateRange(validation.validated.checkInDate, validation.validated.checkOutDate);
+        if (!dateValidation.isValid) {
+            return res.status(400).json({ message: dateValidation.errors.join(', ') });
+        }
+
+        // Normalize payment method
+        validation.validated.paymentMethod = normalizePaymentMethod(validation.validated.paymentMethod);
+
+        // Determine status based on check-in date (if not explicitly set)
+        if (!req.body.status) {
+            const checkInDate = new Date(validation.validated.checkInDate);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            checkInDate.setHours(0, 0, 0, 0);
+            
+            if (checkInDate.getTime() === today.getTime()) {
+                validation.validated.status = 'checked-in';
+            } else {
+                validation.validated.status = 'confirmed';
+            }
+        }
+
         const Reservations = getModel(req, 'Reservations');
         const reservation = new Reservations({
-            ...req.body,
+            ...validation.validated,
+            checkInDate: dateValidation.checkIn,
+            checkOutDate: dateValidation.checkOut,
             property: getPropertyId(req),
         });
 
@@ -571,7 +606,7 @@ router.post('/', async (req, res) => {
 router.get('/', async (req, res) => {
     try {
         const Reservations = getModel(req, 'Reservations');
-        const { page = 1, limit = 15, search = '', status = '' } = req.query;
+        const { page, limit, search, status } = validatePagination(req.query);
         const propertyId = getPropertyId(req);
 
         const query = { property: propertyId };
@@ -628,7 +663,13 @@ router.get('/departures/:date', async (req, res) => {
     try {
         const Reservations = getModel(req, 'Reservations');
         const { date } = req.params;
-        const { page = 1, limit = 50, search = '' } = req.query;
+        
+        // Validate date format
+        if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            return res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD' });
+        }
+        
+        const { page, limit, search } = validatePagination({ ...req.query, limit: req.query.limit || 50 });
         const propertyId = getPropertyId(req);
 
         const start = new Date(`${date}T00:00:00.000Z`);
@@ -674,11 +715,74 @@ router.get('/departures/:date', async (req, res) => {
     }
 });
 
-router.get('/:id', async (req, res) => {
+router.get('/arrivals/:date', async (req, res) => {
     try {
         const Reservations = getModel(req, 'Reservations');
+        const { date } = req.params;
+        
+        // Validate date format
+        if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            return res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD' });
+        }
+        
+        const { page, limit, search } = validatePagination({ ...req.query, limit: req.query.limit || 50 });
+        const propertyId = getPropertyId(req);
+
+        const start = new Date(`${date}T00:00:00.000Z`);
+        const end = new Date(`${date}T23:59:59.999Z`);
+
+        const query = {
+            property: propertyId,
+            checkInDate: { $gte: start, $lte: end },
+            status: { $ne: 'checked-out' },
+        };
+
+        if (search) {
+            query.$or = [
+                { guestName: { $regex: search, $options: 'i' } },
+                { guestEmail: { $regex: search, $options: 'i' } },
+                { guestNumber: { $regex: search, $options: 'i' } },
+                { roomNumber: { $regex: search, $options: 'i' } },
+            ];
+        }
+
+        const skip = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+        const [total, arrivals] = await Promise.all([
+            Reservations.countDocuments(query),
+            Reservations.find(query)
+                .skip(skip)
+                .limit(parseInt(limit, 10))
+                .sort({ checkInDate: 1, guestName: 1 }),
+        ]);
+
+        res.status(200).json({
+            arrivals,
+            pagination: {
+                currentPage: parseInt(page, 10),
+                totalPages: Math.ceil(total / parseInt(limit, 10)),
+                totalItems: total,
+                itemsPerPage: parseInt(limit, 10),
+            },
+        });
+    } catch (error) {
+        console.error('Error fetching arrivals:', error);
+        res.status(500).json({ message: 'Server error fetching arrivals.' });
+    }
+});
+
+router.get('/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid reservation ID format' });
+        }
+        
+        const Reservations = getModel(req, 'Reservations');
         const reservation = await Reservations.findOne({
-            _id: req.params.id,
+            _id: id,
             property: getPropertyId(req),
         });
 
@@ -695,15 +799,54 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid reservation ID format' });
+        }
+        
+        // Validate update fields (all optional, but validate types if provided)
+        const updateSchema = {
+            guestName: { type: 'string' },
+            guestEmail: { type: 'string', custom: (val) => !val || isValidEmail(val) || 'Invalid email format' },
+            guestNumber: { type: 'string', custom: (val) => !val || isValidPhone(val) || 'Invalid phone number' },
+            checkInDate: { type: 'string', isDate: true },
+            checkOutDate: { type: 'string', isDate: true },
+            roomType: { type: 'string', isObjectId: true },
+            numberOfRooms: { type: 'number', min: 1 },
+            totalGuest: { type: 'number', min: 1 },
+            totalAmount: { type: 'number', min: 0 },
+            payedAmount: { type: 'number', min: 0 },
+            paymentMethod: { type: 'string' },
+            Source: { type: 'string', enum: ['direct', 'booking.com', 'agoda', 'expedia', 'airbnb', 'phone', 'walk-in'] },
+            status: { type: 'string', enum: ['confirmed', 'checked-in', 'checked-out', 'cancelled'] },
+            mealPlan: { type: 'string', enum: ['EP', 'CP', 'MAP', 'AP'] },
+            mealPlanAmount: { type: 'number', min: 0 },
+            mealPlanGuestCount: { type: 'number', min: 0 },
+            mealPlanNights: { type: 'number', min: 0 },
+            mealPlanRate: { type: 'number', min: 0 }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        // Normalize payment method if provided
+        if (validation.validated.paymentMethod) {
+            validation.validated.paymentMethod = normalizePaymentMethod(validation.validated.paymentMethod);
+        }
+
         const Reservations = getModel(req, 'Reservations');
         const oldReservation = await Reservations.findOne({
-            _id: req.params.id,
+            _id: id,
             property: getPropertyId(req)
         });
         
         const reservation = await Reservations.findOneAndUpdate(
-            { _id: req.params.id, property: getPropertyId(req) },
-            { ...req.body, property: getPropertyId(req) },
+            { _id: id, property: getPropertyId(req) },
+            { ...validation.validated, property: getPropertyId(req) },
             { new: true }
         );
 
@@ -725,9 +868,16 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid reservation ID format' });
+        }
+        
         const Reservations = getModel(req, 'Reservations');
         const result = await Reservations.findOneAndDelete({
-            _id: req.params.id,
+            _id: id,
             property: getPropertyId(req),
         });
 

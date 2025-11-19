@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const mongoose = require('mongoose');
 const router = express.Router();
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const { validateAndSetDefaults, validatePagination, isValidObjectId, isValidEmail, isValidPhone } = require('../../utils/validation');
 
 router.use(bodyParser.json());
 router.use(authenticate);
@@ -13,30 +14,46 @@ const getPropertyId = (req) => req.tenant.property._id;
 
 const createGuestProfileWithReservation = async (req, res, reservationIdOverride = null) => {
     try {
+        // Validate and set defaults
+        const guestSchema = {
+            guestName: { type: 'string', required: true },
+            guestEmail: { type: 'string', default: '', custom: (val) => !val || isValidEmail(val) || 'Invalid email format' },
+            guestNumber: { type: 'string', default: '', custom: (val) => !val || isValidPhone(val) || 'Invalid phone number' },
+            reservationId: { type: 'string', required: true, isObjectId: true },
+            guestType: { type: 'string', default: 'regular', enum: ['regular', 'vip', 'family', 'corporate', 'couple', 'friends', 'other'] },
+            aadhaarNumber: { type: 'string', default: '' },
+            adultCount: { type: 'number', default: 1, min: 1 },
+            childCount: { type: 'number', default: 0, min: 0 },
+            totalSpend: { type: 'number', default: 0, min: 0 },
+            records: { isArray: true, default: [] },
+            checkInDate: { type: 'string', isDate: true },
+            checkOutDate: { type: 'string', isDate: true }
+        };
+
+        const validation = validateAndSetDefaults(req.body, guestSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const effectiveReservationId = reservationIdOverride || validation.validated.reservationId;
+
+        if (!isValidObjectId(effectiveReservationId)) {
+            return res.status(400).json({ message: "Invalid reservationId provided." });
+        }
+
         const {
             guestName,
             guestEmail,
             guestNumber,
-            reservationId,
             guestType,
             aadhaarNumber,
             adultCount,
             childCount,
             totalSpend,
-            records = [],
+            records,
             checkInDate,
             checkOutDate
-        } = req.body;
-
-        const effectiveReservationId = reservationIdOverride || reservationId;
-
-        if (!guestName || !effectiveReservationId) {
-            return res.status(400).json({ message: "guestName and reservationId are required." });
-        }
-
-        if (!mongoose.Types.ObjectId.isValid(effectiveReservationId)) {
-            return res.status(400).json({ message: "Invalid reservationId provided." });
-        }
+        } = validation.validated;
 
         const propertyId = getPropertyId(req);
         const guestProfiles = getModel(req, 'GuestProfiles');
@@ -115,15 +132,16 @@ const createGuestProfileWithReservation = async (req, res, reservationIdOverride
 // Get all guest profiles with pagination and search
 router.get('/guests', async (req, res) => {
     try {
-        const { page = 1, limit = 15, search = '', reservationId = '' } = req.query;
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const { page, limit, search } = validatePagination(req.query);
+        const reservationId = req.query.reservationId || '';
+        const skip = (page - 1) * limit;
         const propertyId = getPropertyId(req);
         const guestProfiles = getModel(req, 'GuestProfiles');
         
         // Build search query
         let searchQuery = { property: propertyId };
         if (reservationId) {
-            if (!mongoose.Types.ObjectId.isValid(reservationId)) {
+            if (!isValidObjectId(reservationId)) {
                 return res.status(400).json({ message: "Invalid reservationId provided." });
             }
             searchQuery.reservationId = reservationId;
@@ -142,21 +160,21 @@ router.get('/guests', async (req, res) => {
         // Get paginated results
         const guests = await guestProfiles.find(searchQuery)
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(limit)
             .sort({ createdAt: -1 });
         
         // Calculate pagination info
-        const totalPages = Math.ceil(total / parseInt(limit));
-        const hasNextPage = parseInt(page) < totalPages;
-        const hasPrevPage = parseInt(page) > 1;
+        const totalPages = Math.ceil(total / limit);
+        const hasNextPage = page < totalPages;
+        const hasPrevPage = page > 1;
         
         res.status(200).json({
             guests,
             pagination: {
-                currentPage: parseInt(page),
+                currentPage: page,
                 totalPages,
                 totalItems: total,
-                itemsPerPage: parseInt(limit),
+                itemsPerPage: limit,
                 hasNextPage,
                 hasPrevPage
             }
@@ -176,6 +194,26 @@ router.post('/reservation/:reservationId', (req, res) =>
 // Create or update guest profile (for check-in process)
 router.post('/create-or-update', async (req, res) => {
     try {
+        // Validate and set defaults
+        const guestSchema = {
+            guestName: { type: 'string', required: true },
+            guestEmail: { type: 'string', default: '', custom: (val) => !val || isValidEmail(val) || 'Invalid email format' },
+            guestNumber: { type: 'string', default: '', custom: (val) => !val || isValidPhone(val) || 'Invalid phone number' },
+            totalSpend: { type: 'number', default: 0, min: 0 },
+            guestType: { type: 'string', default: 'regular', enum: ['regular', 'vip', 'family', 'corporate', 'couple', 'friends', 'other'] },
+            checkInDate: { type: 'string', isDate: true },
+            checkOutDate: { type: 'string', isDate: true },
+            reservationId: { type: 'string', isObjectId: true },
+            aadhaarNumber: { type: 'string', default: '' },
+            adultCount: { type: 'number', default: 1, min: 1 },
+            childCount: { type: 'number', default: 0, min: 0 }
+        };
+
+        const validation = validateAndSetDefaults(req.body, guestSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
         const {
             guestName,
             guestEmail,
@@ -188,17 +226,18 @@ router.post('/create-or-update', async (req, res) => {
             aadhaarNumber,
             adultCount,
             childCount
-        } = req.body;
+        } = validation.validated;
+
         const propertyId = getPropertyId(req);
         const guestProfiles = getModel(req, 'GuestProfiles');
         const reservationsModel = getModel(req, 'Reservations');
         
         console.log('=== GUEST PROFILE CREATE/UPDATE DEBUG ===');
-        console.log('Request body:', req.body);
+        console.log('Request body:', validation.validated);
 
         let reservation = null;
         if (reservationId) {
-            if (!mongoose.Types.ObjectId.isValid(reservationId)) {
+            if (!isValidObjectId(reservationId)) {
                 return res.status(400).json({ message: "Invalid reservationId provided." });
             }
             reservation = await reservationsModel.findOne({
@@ -335,7 +374,30 @@ router.post('/create-or-update', async (req, res) => {
 router.put('/guest/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const updateData = { ...req.body };
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid guest ID format' });
+        }
+
+        // Validate update fields
+        const updateSchema = {
+            guestName: { type: 'string' },
+            guestEmail: { type: 'string', custom: (val) => !val || isValidEmail(val) || 'Invalid email format' },
+            guestNumber: { type: 'string', custom: (val) => !val || isValidPhone(val) || 'Invalid phone number' },
+            guestType: { type: 'string', enum: ['regular', 'vip', 'family', 'corporate', 'couple', 'friends', 'other'] },
+            aadhaarNumber: { type: 'string' },
+            adultCount: { type: 'number', min: 1 },
+            childCount: { type: 'number', min: 0 },
+            totalSpend: { type: 'number', min: 0 }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const updateData = { ...validation.validated };
         delete updateData.property;
         const guestProfiles = getModel(req, 'GuestProfiles');
         

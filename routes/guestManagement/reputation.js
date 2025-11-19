@@ -2,6 +2,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const { validateAndSetDefaults, validatePagination, isValidObjectId } = require('../../utils/validation');
 
 const router = express.Router();
 router.use(bodyParser.json());
@@ -14,14 +15,8 @@ const getPropertyId = (req) => req.tenant.property._id;
 // Get all reviews with pagination and filtering
 router.get('/', async (req, res) => {
     try {
-        const { 
-            page = 1, 
-            limit = 15, 
-            source = '', 
-            sentiment = '', 
-            rating = '',
-            search = ''
-        } = req.query;
+        const { page, limit, search } = validatePagination(req.query);
+        const { source = '', sentiment = '', rating = '' } = req.query;
         const propertyId = getPropertyId(req);
         const Review = getModel(req, 'Review');
         
@@ -48,7 +43,7 @@ router.get('/', async (req, res) => {
         }
         
         // Calculate pagination
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const skip = (page - 1) * limit;
         
         // Get total count for pagination
         const total = await Review.countDocuments(filterQuery);
@@ -56,7 +51,7 @@ router.get('/', async (req, res) => {
         // Get paginated results
         const reviews = await Review.find(filterQuery)
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(limit)
             .sort({ date: -1 }); // Sort by newest first
         
         // Calculate statistics
@@ -83,10 +78,10 @@ router.get('/', async (req, res) => {
         res.status(200).json({
             reviews,
             pagination: {
-                currentPage: parseInt(page),
-                totalPages: Math.ceil(total / parseInt(limit)),
+                currentPage: page,
+                totalPages: Math.ceil(total / limit),
                 totalItems: total,
-                itemsPerPage: parseInt(limit)
+                itemsPerPage: limit
             },
             statistics: stats[0] || {
                 totalReviews: 0,
@@ -117,8 +112,15 @@ router.get('/all', async (req, res) => {
 // Get review by ID
 router.get('/:id', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid review ID format' });
+        }
+        
         const Review = getModel(req, 'Review');
-        const review = await Review.findOne({ _id: req.params.id, property: getPropertyId(req) });
+        const review = await Review.findOne({ _id: id, property: getPropertyId(req) });
         if (!review) {
             return res.status(404).json({ message: "Review not found." });
         }
@@ -133,27 +135,20 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
     
     try {
-        const { name, review, rating, source } = req.body;
-        
-        // Validation
-        if (!name || !review || !rating || !source) {
-            return res.status(400).json({ 
-                message: "All fields (name, review, rating, source) are required." 
-            });
+        // Validate and set defaults
+        const reviewSchema = {
+            name: { type: 'string', required: true },
+            review: { type: 'string', required: true },
+            rating: { type: 'number', required: true, min: 1, max: 5, custom: (val) => Number.isInteger(val) || 'Rating must be an integer' },
+            source: { type: 'string', required: true, enum: ['Google', 'MakeMyTrip', 'Booking.com', 'Direct', 'TripAdvisor', 'Expedia'] }
+        };
+
+        const validation = validateAndSetDefaults(req.body, reviewSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
         }
-        
-        if (rating < 1 || rating > 5 || !Number.isInteger(rating)) {
-            return res.status(400).json({ 
-                message: "Rating must be an integer between 1 and 5." 
-            });
-        }
-        
-        const validSources = ['Google', 'MakeMyTrip', 'Booking.com', 'Direct', 'TripAdvisor', 'Expedia'];
-        if (!validSources.includes(source)) {
-            return res.status(400).json({ 
-                message: "Invalid source. Must be one of: " + validSources.join(', ') 
-            });
-        }
+
+        const { name, review, rating, source } = validation.validated;
         
         // Get sentiment from AI API
         const aiApiBaseUrl = process.env.AI_API_BASEURL;
@@ -219,26 +214,32 @@ router.post('/', async (req, res) => {
 // Update review
 router.put('/:id', async (req, res) => {
     try {
-        const { name, review, rating, source, sentiment, verified } = req.body;
+        const { id } = req.params;
         
-        const updateData = {};
-        if (name !== undefined) updateData.name = name;
-        if (review !== undefined) updateData.review = review;
-        if (rating !== undefined) {
-            if (rating < 1 || rating > 5 || !Number.isInteger(rating)) {
-                return res.status(400).json({ 
-                    message: "Rating must be an integer between 1 and 5." 
-                });
-            }
-            updateData.rating = rating;
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid review ID format' });
         }
-        if (source !== undefined) updateData.source = source;
-        if (sentiment !== undefined) updateData.sentiment = sentiment;
-        if (verified !== undefined) updateData.verified = verified;
+
+        // Validate update fields
+        const updateSchema = {
+            name: { type: 'string' },
+            review: { type: 'string' },
+            rating: { type: 'number', min: 1, max: 5, custom: (val) => !val || Number.isInteger(val) || 'Rating must be an integer' },
+            source: { type: 'string', enum: ['Google', 'MakeMyTrip', 'Booking.com', 'Direct', 'TripAdvisor', 'Expedia'] },
+            sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },
+            verified: { type: 'boolean' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
         
         const Review = getModel(req, 'Review');
         const updatedReview = await Review.findOneAndUpdate(
-            { _id: req.params.id, property: getPropertyId(req) }, 
+            { _id: id, property: getPropertyId(req) },
+            validation.validated, 
             updateData, 
             { new: true, runValidators: true }
         );
@@ -257,8 +258,15 @@ router.put('/:id', async (req, res) => {
 // Delete review
 router.delete('/:id', async (req, res) => {
     try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid review ID format' });
+        }
+        
         const Review = getModel(req, 'Review');
-        const deletedReview = await Review.findOneAndDelete({ _id: req.params.id, property: getPropertyId(req) });
+        const deletedReview = await Review.findOneAndDelete({ _id: id, property: getPropertyId(req) });
         
         if (!deletedReview) {
             return res.status(404).json({ message: "Review not found." });
@@ -326,13 +334,17 @@ router.get('/stats/overview', async (req, res) => {
 // Get reviews summary using AI
 router.post('/summarize', async (req, res) => {
     try {
-        const { reviews } = req.body;
-        
-        if (!reviews || !Array.isArray(reviews) || reviews.length === 0) {
-            return res.status(400).json({ 
-                message: "Reviews array is required and must not be empty." 
-            });
+        // Validate and set defaults
+        const summarizeSchema = {
+            reviews: { isArray: true, required: true, custom: (val) => Array.isArray(val) && val.length > 0 || 'Reviews array must not be empty' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, summarizeSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
         }
+
+        const { reviews } = validation.validated;
         
         // Get language from AI settings
         const propertyId = getPropertyId(req);

@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const router = express.Router();
 const emailService = require('../../services/emailService');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
+const { validateAndSetDefaults, validatePagination, isValidObjectId, isValidEmail, isValidPhone } = require('../../utils/validation');
 
 router.use(bodyParser.json());
 router.use(authenticate);
@@ -16,8 +17,9 @@ const getPropertyId = (req) => req.tenant.property._id;
 // Get all conversations with pagination and filters
 router.get('/conversations', async (req, res) => {
     try {
-        const { page = 1, limit = 20, status = 'open', search = '', assignedTo = '' } = req.query;
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const { page, limit, search } = validatePagination({ ...req.query, limit: req.query.limit || 20 });
+        const { status = 'open', assignedTo = '' } = req.query;
+        const skip = (page - 1) * limit;
         const propertyId = getPropertyId(req);
         const Conversation = getModel(req, 'Conversation');
 
@@ -43,7 +45,7 @@ router.get('/conversations', async (req, res) => {
         
         const conversations = await Conversation.find(query)
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(limit)
             .sort({ lastMessageAt: -1 })
             .populate('guestId', 'guestName guestEmail guestNumber')
             .populate('reservationId', 'confirmationNumber');
@@ -51,10 +53,10 @@ router.get('/conversations', async (req, res) => {
         res.status(200).json({
             conversations,
             pagination: {
-                currentPage: parseInt(page),
-                totalPages: Math.ceil(total / parseInt(limit)),
+                currentPage: page,
+                totalPages: Math.ceil(total / limit),
                 totalItems: total,
-                itemsPerPage: parseInt(limit)
+                itemsPerPage: limit
             }
         });
     } catch (error) {
@@ -67,6 +69,12 @@ router.get('/conversations', async (req, res) => {
 router.get('/conversations/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid conversation ID format' });
+        }
+        
         const propertyId = getPropertyId(req);
         const Conversation = getModel(req, 'Conversation');
         const Message = getModel(req, 'Message');
@@ -95,7 +103,25 @@ router.get('/conversations/:id', async (req, res) => {
 // Create new conversation
 router.post('/conversations', async (req, res) => {
     try {
-        const { guestId, guestName, guestEmail, guestPhone, reservationId, roomNumber, assignedTo, assignedToName, notes } = req.body;
+        // Validate and set defaults
+        const conversationSchema = {
+            guestId: { type: 'string', isObjectId: true },
+            guestName: { type: 'string', required: true },
+            guestEmail: { type: 'string', default: '', custom: (val) => !val || isValidEmail(val) || 'Invalid email format' },
+            guestPhone: { type: 'string', default: '', custom: (val) => !val || isValidPhone(val) || 'Invalid phone number' },
+            reservationId: { type: 'string', isObjectId: true },
+            roomNumber: { type: 'string', default: '' },
+            assignedTo: { type: 'string', default: '' },
+            assignedToName: { type: 'string', default: '' },
+            notes: { type: 'string', default: '' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, conversationSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { guestId, guestName, guestEmail, guestPhone, reservationId, roomNumber, assignedTo, assignedToName, notes } = validation.validated;
         const propertyId = getPropertyId(req);
         const Conversation = getModel(req, 'Conversation');
         
@@ -151,7 +177,29 @@ router.post('/conversations', async (req, res) => {
 router.put('/conversations/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const updateData = { ...req.body };
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid conversation ID format' });
+        }
+
+        // Validate update fields
+        const updateSchema = {
+            status: { type: 'string', enum: ['open', 'closed', 'archived'] },
+            assignedTo: { type: 'string' },
+            assignedToName: { type: 'string' },
+            notes: { type: 'string' },
+            guestName: { type: 'string' },
+            guestEmail: { type: 'string', custom: (val) => !val || isValidEmail(val) || 'Invalid email format' },
+            guestPhone: { type: 'string', custom: (val) => !val || isValidPhone(val) || 'Invalid phone number' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+        
+        const updateData = { ...validation.validated };
         delete updateData.property;
         
         const Conversation = getModel(req, 'Conversation');
@@ -181,14 +229,20 @@ router.put('/conversations/:id', async (req, res) => {
 router.get('/conversations/:conversationId/messages', async (req, res) => {
     try {
         const { conversationId } = req.params;
-        const { page = 1, limit = 50 } = req.query;
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        
+        // Validate ObjectId
+        if (!isValidObjectId(conversationId)) {
+            return res.status(400).json({ message: 'Invalid conversation ID format' });
+        }
+        
+        const { page, limit } = validatePagination({ ...req.query, limit: req.query.limit || 50 });
+        const skip = (page - 1) * limit;
         const propertyId = getPropertyId(req);
         const Message = getModel(req, 'Message');
 
         const messages = await Message.find({ conversationId, property: propertyId })
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(limit)
             .sort({ createdAt: -1 });
         
         const total = await Message.countDocuments({ conversationId, property: propertyId });
@@ -196,8 +250,8 @@ router.get('/conversations/:conversationId/messages', async (req, res) => {
         res.status(200).json({
             messages: messages.reverse(), // Reverse to show oldest first
             pagination: {
-                currentPage: parseInt(page),
-                totalPages: Math.ceil(total / parseInt(limit)),
+                currentPage: page,
+                totalPages: Math.ceil(total / limit),
                 totalItems: total
             }
         });
@@ -211,7 +265,30 @@ router.get('/conversations/:conversationId/messages', async (req, res) => {
 router.post('/conversations/:conversationId/messages', async (req, res) => {
     try {
         const { conversationId } = req.params;
-        const { senderId, senderName, senderType, message, messageType, priority, category, attachments } = req.body;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(conversationId)) {
+            return res.status(400).json({ message: 'Invalid conversation ID format' });
+        }
+
+        // Validate and set defaults
+        const messageSchema = {
+            senderId: { type: 'string', required: true },
+            senderName: { type: 'string', required: true },
+            senderType: { type: 'string', default: 'staff', enum: ['staff', 'guest', 'system'] },
+            message: { type: 'string', required: true },
+            messageType: { type: 'string', default: 'text', enum: ['text', 'image', 'file', 'link'] },
+            priority: { type: 'string', default: 'normal', enum: ['low', 'normal', 'high', 'urgent'] },
+            category: { type: 'string', default: 'general' },
+            attachments: { isArray: true, default: [] }
+        };
+
+        const validation = validateAndSetDefaults(req.body, messageSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { senderId, senderName, senderType, message, messageType, priority, category, attachments } = validation.validated;
         const propertyId = getPropertyId(req);
         const Conversation = getModel(req, 'Conversation');
         const Message = getModel(req, 'Message');
@@ -227,12 +304,12 @@ router.post('/conversations/:conversationId/messages', async (req, res) => {
             conversationId,
             senderId,
             senderName,
-            senderType: senderType || 'staff',
+            senderType,
             message,
-            messageType: messageType || 'text',
-            priority: priority || 'normal',
-            category: category || 'general',
-            attachments: attachments || [],
+            messageType,
+            priority,
+            category,
+            attachments,
             property: propertyId
         });
         
@@ -262,6 +339,12 @@ router.post('/conversations/:conversationId/messages', async (req, res) => {
 router.put('/conversations/:conversationId/messages/read', async (req, res) => {
     try {
         const { conversationId } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(conversationId)) {
+            return res.status(400).json({ message: 'Invalid conversation ID format' });
+        }
+        
         const propertyId = getPropertyId(req);
         const Message = getModel(req, 'Message');
         const Conversation = getModel(req, 'Conversation');
@@ -289,8 +372,9 @@ router.put('/conversations/:conversationId/messages/read', async (req, res) => {
 // Get all campaigns
 router.get('/campaigns', async (req, res) => {
     try {
-        const { page = 1, limit = 20, status = '', search = '' } = req.query;
-        const skip = (parseInt(page) - 1) * parseInt(limit);
+        const { page, limit, search } = validatePagination({ ...req.query, limit: req.query.limit || 20 });
+        const { status = '' } = req.query;
+        const skip = (page - 1) * limit;
         const propertyId = getPropertyId(req);
         const Campaign = getModel(req, 'Campaign');
 
@@ -308,7 +392,7 @@ router.get('/campaigns', async (req, res) => {
         
         const campaigns = await Campaign.find(query)
             .skip(skip)
-            .limit(parseInt(limit))
+            .limit(limit)
             .sort({ createdAt: -1 });
         
         // Calculate open rates
@@ -320,10 +404,10 @@ router.get('/campaigns', async (req, res) => {
         res.status(200).json({
             campaigns: campaignsWithStats,
             pagination: {
-                currentPage: parseInt(page),
-                totalPages: Math.ceil(total / parseInt(limit)),
+                currentPage: page,
+                totalPages: Math.ceil(total / limit),
                 totalItems: total,
-                itemsPerPage: parseInt(limit)
+                itemsPerPage: limit
             }
         });
     } catch (error) {
@@ -336,6 +420,12 @@ router.get('/campaigns', async (req, res) => {
 router.get('/campaigns/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid campaign ID format' });
+        }
+        
         const propertyId = getPropertyId(req);
         const Campaign = getModel(req, 'Campaign');
 
@@ -382,7 +472,28 @@ router.post('/campaigns', async (req, res) => {
 router.put('/campaigns/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const updateData = { ...req.body };
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid campaign ID format' });
+        }
+
+        // Validate update fields (all optional)
+        const updateSchema = {
+            name: { type: 'string' },
+            subject: { type: 'string' },
+            content: { type: 'string' },
+            status: { type: 'string', enum: ['Draft', 'Scheduled', 'Sent', 'Cancelled'] },
+            audience: { type: 'object' },
+            scheduledAt: { type: 'string', isDate: true }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const updateData = { ...validation.validated };
         delete updateData.property;
         const Campaign = getModel(req, 'Campaign');
 
@@ -410,6 +521,12 @@ router.put('/campaigns/:id', async (req, res) => {
 router.post('/campaigns/:id/send', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid campaign ID format' });
+        }
+        
         const propertyId = getPropertyId(req);
         const Campaign = getModel(req, 'Campaign');
         const GuestProfiles = getModel(req, 'GuestProfiles');
@@ -534,6 +651,11 @@ router.delete('/campaigns/:id', async (req, res) => {
     try {
         const { id } = req.params;
         
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid campaign ID format' });
+        }
+        
         const Campaign = getModel(req, 'Campaign');
         const campaign = await Campaign.findOneAndDelete({ _id: id, property: getPropertyId(req) });
         
@@ -552,6 +674,12 @@ router.delete('/campaigns/:id', async (req, res) => {
 router.get('/campaigns/:id/analytics', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid campaign ID format' });
+        }
+        
         const propertyId = getPropertyId(req);
         const Campaign = getModel(req, 'Campaign');
 
@@ -625,6 +753,12 @@ router.get('/templates', async (req, res) => {
 router.get('/templates/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid template ID format' });
+        }
+        
         const MessageTemplate = getModel(req, 'MessageTemplate');
         
         const template = await MessageTemplate.findOne({ _id: id, property: getPropertyId(req) });
@@ -666,7 +800,27 @@ router.post('/templates', async (req, res) => {
 router.put('/templates/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const updateData = { ...req.body };
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid template ID format' });
+        }
+
+        // Validate update fields (all optional)
+        const updateSchema = {
+            name: { type: 'string' },
+            subject: { type: 'string' },
+            content: { type: 'string' },
+            category: { type: 'string' },
+            isActive: { type: 'boolean' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, updateSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const updateData = { ...validation.validated };
         delete updateData.property;
         const MessageTemplate = getModel(req, 'MessageTemplate');
         
@@ -694,6 +848,12 @@ router.put('/templates/:id', async (req, res) => {
 router.delete('/templates/:id', async (req, res) => {
     try {
         const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid template ID format' });
+        }
+        
         const MessageTemplate = getModel(req, 'MessageTemplate');
         
         const template = await MessageTemplate.findOneAndDelete({ _id: id, property: getPropertyId(req) });
