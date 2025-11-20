@@ -34,6 +34,7 @@ router.post('/check-availability', requireModuleAccess('front-office'), async (r
         const RoomType = getModel(req, 'RoomType');
         const Reservation = getModel(req, 'Reservations');
         
+        const roomTypeId = validation.validated.roomTypeId;
         const requestedCheckIn = dateValidation.checkIn;
         const requestedCheckOut = dateValidation.checkOut;
 
