@@ -844,9 +844,15 @@ router.put('/:id', async (req, res) => {
             property: getPropertyId(req)
         });
         
+        // Build update object - only include roomNumbers if it's provided in the request
+        const updateData = { ...validation.validated, property: getPropertyId(req) };
+        if (req.body.roomNumbers !== undefined && Array.isArray(req.body.roomNumbers)) {
+            updateData.roomNumbers = req.body.roomNumbers;
+        }
+        
         const reservation = await Reservations.findOneAndUpdate(
             { _id: id, property: getPropertyId(req) },
-            { ...validation.validated, property: getPropertyId(req) },
+            updateData,
             { new: true }
         );
 
