@@ -638,19 +638,58 @@ router.post('/campaigns/:id/send', async (req, res) => {
         // Fetch guests from database if not custom
         if (campaign.audience.type !== 'custom') {
             const guests = await GuestProfiles.find(query).select('_id guestName guestEmail');
-            recipients = guests.map(g => ({
-                guestId: g._id,
-                email: g.guestEmail,
-                name: g.guestName
-            }));
+            recipients = guests
+                .filter(g => g.guestEmail && g.guestEmail.trim()) // Only include guests with valid emails
+                .map(g => ({
+                    guestId: g._id,
+                    email: g.guestEmail.trim(),
+                    name: g.guestName || 'Guest'
+                }));
+        } else {
+            // For custom recipients, filter out invalid emails
+            recipients = (campaign.audience.customRecipients || [])
+                .filter(r => r && r.email && r.email.trim())
+                .map(r => ({
+                    guestId: r.guestId,
+                    email: r.email.trim(),
+                    name: r.name || 'Guest'
+                }));
         }
         
         if (recipients.length === 0) {
-            return res.status(400).json({ message: "No recipients found for this campaign." });
+            console.error('Campaign send failed: No recipients found', {
+                campaignId: id,
+                audienceType: campaign.audience.type,
+                audience: campaign.audience
+            });
+            return res.status(400).json({ 
+                message: "No recipients found for this campaign. Please ensure your audience selection includes guests with valid email addresses.",
+                details: {
+                    audienceType: campaign.audience.type,
+                    hint: campaign.audience.type === 'all' 
+                        ? 'No guests in the system have email addresses.'
+                        : campaign.audience.type === 'segment'
+                        ? 'No guests match your segment criteria or they don\'t have email addresses.'
+                        : 'No valid email addresses in your custom recipient list.'
+                }
+            });
+        }
+        
+        // Validate campaign has required fields
+        if (!campaign.subject || !campaign.subject.trim()) {
+            return res.status(400).json({ 
+                message: "Campaign subject is required. Please select a template that includes a subject line." 
+            });
+        }
+        
+        if (!campaign.content || !campaign.content.trim()) {
+            return res.status(400).json({ 
+                message: "Campaign content is required. Please select a template that includes content." 
+            });
         }
         
         // Prepare email content (inject tracking pixel for open-rate analytics)
-        const subject = campaign.subject || 'Newsletter from Hotel';
+        const subject = campaign.subject.trim();
         const baseUrl = `${req.protocol}://${req.get('host')}`;
         const trackingUrl = `${baseUrl}/api/guestmanagement/communication/open?code=${encodeURIComponent(
             req.tenant.property.code
@@ -659,12 +698,23 @@ router.post('/campaigns/:id/send', async (req, res) => {
         const htmlContent = `${campaign.content || ''}${trackingPixelHtml}`;
         
         // Send emails using tenant-specific integration
-        const emailResults = await emailService.sendBulkEmails(
-            req.tenant,
-            recipients,
-            subject,
-            htmlContent,
-        );
+        let emailResults;
+        try {
+            emailResults = await emailService.sendBulkEmails(
+                req.tenant,
+                recipients,
+                subject,
+                htmlContent,
+            );
+        } catch (emailError) {
+            if (emailError.code === 'EMAIL_INTEGRATION_NOT_CONFIGURED') {
+                return res.status(400).json({
+                    message: 'Email integration is not configured. Please connect an SMTP provider in Settings > Email Integration.',
+                    code: 'EMAIL_INTEGRATION_NOT_CONFIGURED'
+                });
+            }
+            throw emailError; // Re-throw other errors
+        }
         
         // Update campaign with results
         campaign.status = 'Sent';
