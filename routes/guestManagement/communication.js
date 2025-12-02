@@ -26,9 +26,15 @@ const OPEN_PIXEL_BUFFER = Buffer.from(
 // Public (unauthenticated) tracking pixel endpoint for campaign opens
 router.get('/open', async (req, res) => {
     try {
-        const { code, cid } = req.query;
+        const { code, cid, email } = req.query;
+
+        console.log('=== CAMPAIGN OPEN TRACKING ===');
+        console.log('Code:', code);
+        console.log('Campaign ID:', cid);
+        console.log('Recipient email:', email);
 
         if (!code || !cid || !isValidObjectId(cid)) {
+            console.log('Invalid tracking parameters');
             res.set('Content-Type', 'image/gif');
             res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
             res.set('Content-Length', OPEN_PIXEL_BUFFER.length);
@@ -36,14 +42,77 @@ router.get('/open', async (req, res) => {
         }
 
         const normalizedCode = String(code).toUpperCase().trim();
-        const { models } = await getTenantContext(normalizedCode);
-        const Campaign = models.Campaign;
+        console.log('Normalized code:', normalizedCode);
+        
+        let tenantContext;
+        try {
+            tenantContext = await getTenantContext(normalizedCode);
+            console.log('Tenant context retrieved successfully');
+        } catch (err) {
+            console.error('Error getting tenant context:', err);
+            throw err;
+        }
+        
+        const { models } = tenantContext;
+        const Campaign = models?.Campaign;
+        
+        console.log('Campaign model available:', !!Campaign);
 
         if (Campaign) {
-            await Campaign.findByIdAndUpdate(cid, { $inc: { opened: 1 } }).catch(() => {});
+            // First, check if campaign exists
+            const existingCampaign = await Campaign.findById(cid).catch((err) => {
+                console.error('Error finding campaign:', err);
+                return null;
+            });
+            
+            if (!existingCampaign) {
+                console.log('❌ Campaign not found with ID:', cid);
+                console.log('Available campaigns in this tenant:', await Campaign.find({}).select('_id name').limit(5).lean());
+            } else {
+                console.log('✅ Campaign found:', {
+                    id: existingCampaign._id.toString(),
+                    name: existingCampaign.name,
+                    currentOpened: existingCampaign.opened || 0,
+                    property: existingCampaign.property?.toString()
+                });
+                
+                // Ensure opened field exists, initialize to 0 if not
+                const currentOpened = existingCampaign.opened || 0;
+                
+                // Use findByIdAndUpdate to increment opened count
+                const updateResult = await Campaign.findByIdAndUpdate(
+                    cid,
+                    { $inc: { opened: 1 } },
+                    { new: true, setDefaultsOnInsert: true }
+                ).catch((err) => {
+                    console.error('❌ Error updating campaign open count:', err);
+                    console.error('Error details:', {
+                        message: err.message,
+                        name: err.name,
+                        code: err.code
+                    });
+                    return null;
+                });
+                
+                if (updateResult) {
+                    console.log('✅ Successfully tracked open!');
+                    console.log('Previous count:', currentOpened);
+                    console.log('New count:', updateResult.opened);
+                    
+                    // Verify the update
+                    const verifyCampaign = await Campaign.findById(cid).select('opened').lean();
+                    console.log('Verification - Current opened count:', verifyCampaign?.opened);
+                } else {
+                    console.log('❌ Campaign update returned null');
+                }
+            }
+        } else {
+            console.log('❌ Campaign model not available in tenant context');
+            console.log('Available models:', Object.keys(models || {}));
         }
     } catch (error) {
         console.error('Error tracking campaign open:', error);
+        console.error('Error stack:', error.stack);
     } finally {
         // Always return a tiny transparent GIF so emails render without errors
         res.set('Content-Type', 'image/gif');
@@ -564,11 +633,16 @@ router.put('/campaigns/:id', async (req, res) => {
 
 // Send campaign (update status and calculate recipients)
 router.post('/campaigns/:id/send', async (req, res) => {
+    console.log('=== CAMPAIGN SEND REQUEST START ===');
+    console.log('Campaign ID:', req.params.id);
+    console.log('Property ID:', getPropertyId(req));
+    
     try {
         const { id } = req.params;
         
         // Validate ObjectId
         if (!isValidObjectId(id)) {
+            console.log('ERROR: Invalid campaign ID format');
             return res.status(400).json({ message: 'Invalid campaign ID format' });
         }
         
@@ -576,23 +650,50 @@ router.post('/campaigns/:id/send', async (req, res) => {
         const Campaign = getModel(req, 'Campaign');
         const GuestProfiles = getModel(req, 'GuestProfiles');
 
+        console.log('Fetching campaign from database...');
         const campaign = await Campaign.findOne({ _id: id, property: propertyId });
         if (!campaign) {
+            console.log('ERROR: Campaign not found');
             return res.status(404).json({ message: "Campaign not found" });
         }
         
+        console.log('Campaign found:', {
+            name: campaign.name,
+            status: campaign.status,
+            subject: campaign.subject,
+            hasContent: !!campaign.content,
+            audienceType: campaign.audience?.type,
+            templateId: campaign.templateId
+        });
+        
+        // Allow re-sending campaigns (useful for testing or re-sending to same audience)
+        // If you want to prevent re-sending, uncomment the check below:
+        // if (campaign.status === 'Sent') {
+        //     console.log('ERROR: Campaign already sent');
+        //     return res.status(400).json({ 
+        //         message: "Campaign has already been sent. Please create a new campaign to send again.",
+        //         code: 'CAMPAIGN_ALREADY_SENT'
+        //     });
+        // }
+        
         if (campaign.status === 'Sent') {
-            return res.status(400).json({ message: "Campaign has already been sent." });
+            console.log('WARNING: Re-sending a campaign that was already sent');
         }
         
         // Calculate recipients based on audience
+        console.log('Calculating recipients...');
+        console.log('Audience type:', campaign.audience?.type);
+        console.log('Audience data:', JSON.stringify(campaign.audience, null, 2));
+        
         let recipients = [];
         let query = { property: propertyId };
         
         if (campaign.audience.type === 'all') {
+            console.log('Audience: ALL guests');
             // Get all guests
             query = { property: propertyId };
         } else if (campaign.audience.type === 'segment') {
+            console.log('Audience: SEGMENT');
             // Build query based on segment criteria
             // Use OR logic: guests matching guestType OR tags will be included
             if (campaign.audience.segment) {
@@ -631,33 +732,151 @@ router.post('/campaigns/:id/send', async (req, res) => {
                     }
                 }
             }
+            console.log('Segment query:', JSON.stringify(query, null, 2));
         } else if (campaign.audience.type === 'custom') {
+            console.log('Audience: CUSTOM recipients');
             recipients = campaign.audience.customRecipients || [];
+            console.log('Custom recipients count:', recipients.length);
         }
         
-        // Fetch guests from database if not custom
+        // Fetch guests from database if not custom - need full guest data for variable replacement
         if (campaign.audience.type !== 'custom') {
-            const guests = await GuestProfiles.find(query).select('_id guestName guestEmail');
-            recipients = guests
-                .filter(g => g.guestEmail && g.guestEmail.trim()) // Only include guests with valid emails
-                .map(g => ({
+            console.log('Fetching guests from database with query:', JSON.stringify(query, null, 2));
+            const guests = await GuestProfiles.find(query)
+                .select('_id guestName guestEmail guestNumber totalVisits totalSpend guestType')
+                .populate({
+                    path: 'reservationId',
+                    select: 'checkInDate checkOutDate confirmationNumber roomNumbers totalAmount',
+                    populate: {
+                        path: 'roomNumbers',
+                        select: 'roomNumber'
+                    }
+                });
+            console.log('Total guests found:', guests.length);
+            
+            const guestsWithEmails = guests.filter(g => g.guestEmail && g.guestEmail.trim());
+            console.log('Guests with valid emails:', guestsWithEmails.length);
+            console.log('Guests without emails:', guests.length - guestsWithEmails.length);
+            
+            recipients = guestsWithEmails.map(g => {
+                const reservation = g.reservationId || {};
+                const roomNumbers = reservation.roomNumbers || [];
+                // Extract room number - roomNumbers is array of Room objects when populated
+                let roomNumber = '';
+                if (Array.isArray(roomNumbers) && roomNumbers.length > 0) {
+                    const firstRoom = roomNumbers[0];
+                    if (typeof firstRoom === 'object' && firstRoom.roomNumber) {
+                        roomNumber = firstRoom.roomNumber;
+                    } else if (typeof firstRoom === 'string') {
+                        roomNumber = firstRoom;
+                    }
+                }
+                
+                return {
                     guestId: g._id,
                     email: g.guestEmail.trim(),
-                    name: g.guestName || 'Guest'
-                }));
+                    name: g.guestName || 'Guest',
+                    guestData: {
+                        guestName: g.guestName || 'Guest',
+                        guestEmail: g.guestEmail || '',
+                        guestNumber: g.guestNumber || '',
+                        roomNumber: roomNumber || '',
+                        checkInDate: reservation.checkInDate ? new Date(reservation.checkInDate).toLocaleDateString() : '',
+                        checkOutDate: reservation.checkOutDate ? new Date(reservation.checkOutDate).toLocaleDateString() : '',
+                        confirmationNumber: reservation.confirmationNumber || '',
+                        totalAmount: reservation.totalAmount || g.totalSpend || 0,
+                        guestType: g.guestType || 'regular',
+                        totalVisits: g.totalVisits || 0,
+                        propertyName: req.tenant?.property?.name || 'Our Property'
+                    }
+                };
+            });
+            console.log('Final recipients list:', recipients.length);
         } else {
-            // For custom recipients, filter out invalid emails
-            recipients = (campaign.audience.customRecipients || [])
-                .filter(r => r && r.email && r.email.trim())
-                .map(r => ({
+            // For custom recipients, try to fetch guest data if guestId is available
+            console.log('Processing custom recipients...');
+            const customRecipients = campaign.audience.customRecipients || [];
+            console.log('Raw custom recipients:', customRecipients.length);
+            
+            recipients = [];
+            for (const r of customRecipients) {
+                if (!r || !r.email || !r.email.trim()) continue;
+                
+                let guestData = {
+                    guestName: r.name || 'Guest',
+                    guestEmail: r.email.trim(),
+                    guestNumber: '',
+                    roomNumber: '',
+                    checkInDate: '',
+                    checkOutDate: '',
+                    confirmationNumber: '',
+                    totalAmount: 0,
+                    guestType: 'regular',
+                    totalVisits: 0,
+                    propertyName: req.tenant?.property?.name || 'Our Property'
+                };
+                
+                // Try to fetch guest data if guestId is available
+                if (r.guestId) {
+                    try {
+                        const guest = await GuestProfiles.findById(r.guestId)
+                            .select('guestName guestEmail guestNumber totalVisits totalSpend guestType')
+                            .populate({
+                                path: 'reservationId',
+                                select: 'checkInDate checkOutDate confirmationNumber roomNumbers totalAmount',
+                                populate: {
+                                    path: 'roomNumbers',
+                                    select: 'roomNumber'
+                                }
+                            });
+                        
+                        if (guest) {
+                            const reservation = guest.reservationId || {};
+                            const roomNumbers = reservation.roomNumbers || [];
+                            // Extract room number - roomNumbers is array of Room objects when populated
+                            let roomNumber = '';
+                            if (Array.isArray(roomNumbers) && roomNumbers.length > 0) {
+                                const firstRoom = roomNumbers[0];
+                                if (typeof firstRoom === 'object' && firstRoom.roomNumber) {
+                                    roomNumber = firstRoom.roomNumber;
+                                } else if (typeof firstRoom === 'string') {
+                                    roomNumber = firstRoom;
+                                }
+                            }
+                            
+                            guestData = {
+                                guestName: guest.guestName || r.name || 'Guest',
+                                guestEmail: guest.guestEmail || r.email.trim(),
+                                guestNumber: guest.guestNumber || '',
+                                roomNumber: roomNumber || '',
+                                checkInDate: reservation.checkInDate ? new Date(reservation.checkInDate).toLocaleDateString() : '',
+                                checkOutDate: reservation.checkOutDate ? new Date(reservation.checkOutDate).toLocaleDateString() : '',
+                                confirmationNumber: reservation.confirmationNumber || '',
+                                totalAmount: reservation.totalAmount || guest.totalSpend || 0,
+                                guestType: guest.guestType || 'regular',
+                                totalVisits: guest.totalVisits || 0,
+                                propertyName: req.tenant?.property?.name || 'Our Property'
+                            };
+                        }
+                    } catch (err) {
+                        console.log('Could not fetch guest data for custom recipient:', r.email);
+                    }
+                }
+                
+                recipients.push({
                     guestId: r.guestId,
                     email: r.email.trim(),
-                    name: r.name || 'Guest'
-                }));
+                    name: guestData.guestName,
+                    guestData
+                });
+            }
+            console.log('Valid custom recipients:', recipients.length);
         }
         
+        console.log('Final recipients count:', recipients.length);
+        
         if (recipients.length === 0) {
-            console.error('Campaign send failed: No recipients found', {
+            console.error('ERROR: No recipients found', {
                 campaignId: id,
                 audienceType: campaign.audience.type,
                 audience: campaign.audience
@@ -676,38 +895,142 @@ router.post('/campaigns/:id/send', async (req, res) => {
         }
         
         // Validate campaign has required fields
+        console.log('Validating campaign fields...');
+        console.log('Subject:', campaign.subject ? `"${campaign.subject}"` : 'MISSING');
+        console.log('Content length:', campaign.content ? campaign.content.length : 0);
+        
         if (!campaign.subject || !campaign.subject.trim()) {
+            console.log('ERROR: Campaign subject is missing');
             return res.status(400).json({ 
                 message: "Campaign subject is required. Please select a template that includes a subject line." 
             });
         }
         
         if (!campaign.content || !campaign.content.trim()) {
+            console.log('ERROR: Campaign content is missing');
             return res.status(400).json({ 
                 message: "Campaign content is required. Please select a template that includes content." 
             });
         }
         
-        // Prepare email content (inject tracking pixel for open-rate analytics)
-        const subject = campaign.subject.trim();
-        const baseUrl = `${req.protocol}://${req.get('host')}`;
-        const trackingUrl = `${baseUrl}/api/guestmanagement/communication/open?code=${encodeURIComponent(
-            req.tenant.property.code
-        )}&cid=${campaign._id.toString()}`;
-        const trackingPixelHtml = `<img src="${trackingUrl}" alt="" width="1" height="1" style="display:none;" />`;
-        const htmlContent = `${campaign.content || ''}${trackingPixelHtml}`;
+        // Function to replace variables in content with actual guest data
+        const replaceVariables = (content, guestData) => {
+            if (!content || !guestData) return content;
+            
+            let personalizedContent = content;
+            
+            // Replace all variables
+            personalizedContent = personalizedContent.replace(/\{\{guestName\}\}/g, guestData.guestName || 'Guest');
+            personalizedContent = personalizedContent.replace(/\{\{guestEmail\}\}/g, guestData.guestEmail || '');
+            personalizedContent = personalizedContent.replace(/\{\{guestNumber\}\}/g, guestData.guestNumber || '');
+            personalizedContent = personalizedContent.replace(/\{\{roomNumber\}\}/g, guestData.roomNumber || '');
+            personalizedContent = personalizedContent.replace(/\{\{checkInDate\}\}/g, guestData.checkInDate || '');
+            personalizedContent = personalizedContent.replace(/\{\{checkOutDate\}\}/g, guestData.checkOutDate || '');
+            personalizedContent = personalizedContent.replace(/\{\{confirmationNumber\}\}/g, guestData.confirmationNumber || '');
+            personalizedContent = personalizedContent.replace(/\{\{totalAmount\}\}/g, guestData.totalAmount ? guestData.totalAmount.toString() : '0');
+            personalizedContent = personalizedContent.replace(/\{\{guestType\}\}/g, guestData.guestType || 'regular');
+            personalizedContent = personalizedContent.replace(/\{\{totalVisits\}\}/g, guestData.totalVisits ? guestData.totalVisits.toString() : '0');
+            personalizedContent = personalizedContent.replace(/\{\{propertyName\}\}/g, guestData.propertyName || 'Our Property');
+            
+            return personalizedContent;
+        };
         
-        // Send emails using tenant-specific integration
-        let emailResults;
+        // Prepare base subject and content template
+        const subjectTemplate = campaign.subject.trim();
+        const contentTemplate = campaign.content || '';
+        
+        // Use environment variable for base URL if available, otherwise use request host
+        // This ensures tracking URLs work correctly in production
+        // Check for SERVER_URL, API_BASE_URL, or construct from request
+        let baseUrl = process.env.SERVER_URL || process.env.API_BASE_URL;
+        if (baseUrl) {
+            // Remove /api suffix if present
+            baseUrl = baseUrl.replace(/\/api$/, '');
+        } else {
+            // Fallback to request host, but prefer https in production
+            const host = req.get('host');
+            const protocol = process.env.NODE_ENV === 'production' ? 'https' : req.protocol;
+            baseUrl = `${protocol}://${host}`;
+        }
+        
+        console.log('Base URL for tracking:', baseUrl);
+        
+        // Send personalized emails to each recipient
+        console.log('Preparing to send personalized emails...');
+        console.log('Recipients to send to:', recipients.length);
+        console.log('Subject template:', subjectTemplate);
+        console.log('Content template preview (first 100 chars):', contentTemplate.substring(0, 100));
+        
+        let emailResults = {
+            total: recipients.length,
+            sent: 0,
+            failed: 0,
+            errors: []
+        };
+        
         try {
-            emailResults = await emailService.sendBulkEmails(
-                req.tenant,
-                recipients,
-                subject,
-                htmlContent,
-            );
+            console.log('Sending personalized emails...');
+            
+            // Send emails one by one with personalized content
+            for (const recipient of recipients) {
+                try {
+                    // Replace variables in subject and content for this recipient
+                    const personalizedSubject = replaceVariables(subjectTemplate, recipient.guestData);
+                    const personalizedContent = replaceVariables(contentTemplate, recipient.guestData);
+                    
+                    // Add tracking pixel with recipient email for per-recipient tracking
+                    const propertyCode = req.tenant.property.code;
+                    const campaignId = campaign._id.toString();
+                    const trackingUrl = `${baseUrl}/api/guestmanagement/communication/open?code=${encodeURIComponent(
+                        propertyCode
+                    )}&cid=${campaignId}&email=${encodeURIComponent(recipient.email)}`;
+                    const trackingPixelHtml = `<img src="${trackingUrl}" alt="" width="1" height="1" style="display:none;" />`;
+                    const finalHtmlContent = `${personalizedContent}${trackingPixelHtml}`;
+                    
+                    console.log(`Tracking URL for ${recipient.email}:`, trackingUrl);
+                    
+                    // Send individual email
+                    const emailResult = await emailService.sendEmail(
+                        req.tenant,
+                        recipient.email,
+                        personalizedSubject,
+                        finalHtmlContent
+                    );
+                    
+                    if (emailResult.success) {
+                        emailResults.sent += 1;
+                        console.log(`Sent email to ${recipient.email}`);
+                    } else {
+                        emailResults.failed += 1;
+                        emailResults.errors.push({
+                            email: recipient.email,
+                            error: emailResult.error || 'Unknown error'
+                        });
+                        console.error(`Failed to send email to ${recipient.email}:`, emailResult.error);
+                    }
+                } catch (error) {
+                    emailResults.failed += 1;
+                    emailResults.errors.push({
+                        email: recipient.email,
+                        error: error.message
+                    });
+                    console.error(`Failed to send email to ${recipient.email}:`, error.message);
+                }
+            }
+            console.log('Email send results:', {
+                total: emailResults.total,
+                sent: emailResults.sent,
+                failed: emailResults.failed,
+                errors: emailResults.errors?.length || 0
+            });
         } catch (emailError) {
+            console.error('ERROR in emailService.sendBulkEmails:', {
+                message: emailError.message,
+                code: emailError.code,
+                stack: emailError.stack
+            });
             if (emailError.code === 'EMAIL_INTEGRATION_NOT_CONFIGURED') {
+                console.log('ERROR: Email integration not configured');
                 return res.status(400).json({
                     message: 'Email integration is not configured. Please connect an SMTP provider in Settings > Email Integration.',
                     code: 'EMAIL_INTEGRATION_NOT_CONFIGURED'
@@ -745,13 +1068,21 @@ router.post('/campaigns/:id/send', async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('Error sending campaign:', error);
+        console.error('=== CAMPAIGN SEND ERROR ===');
+        console.error('Error type:', error.constructor.name);
+        console.error('Error message:', error.message);
+        console.error('Error code:', error.code);
+        console.error('Error stack:', error.stack);
+        console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+        
         if (error.code === 'EMAIL_INTEGRATION_NOT_CONFIGURED') {
             return res.status(400).json({
                 message: 'Email integration is not configured. Please connect an SMTP provider in Settings.',
             });
         }
         res.status(500).json({ message: "Server error sending campaign.", error: error.message });
+    } finally {
+        console.log('=== CAMPAIGN SEND REQUEST END ===');
     }
 });
 
