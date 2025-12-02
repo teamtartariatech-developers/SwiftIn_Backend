@@ -294,4 +294,145 @@ router.get("/getratesofDate", async (req, res) => {
     }
 });
 
+// Get rates for a date range
+router.get("/getRatesForDateRange", async (req, res) => {
+    try {
+        // Validate query parameters
+        const querySchema = {
+            roomTypeId: { type: 'string', required: true, isObjectId: true },
+            startDate: { type: 'string', required: true, isDate: true },
+            endDate: { type: 'string', required: true, isDate: true }
+        };
+
+        const validation = validateAndSetDefaults(req.query, querySchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const { roomTypeId, startDate, endDate } = validation.validated;
+        const propertyId = getPropertyId(req);
+        const DailyRate = getModel(req, 'dailyRates');
+        const RoomType = getModel(req, 'RoomType');
+
+        // Get room type to determine price model and default rates
+        const roomType = await RoomType.findOne({ _id: roomTypeId, property: propertyId });
+        if (!roomType) {
+            return res.status(404).json({ message: "Room type not found." });
+        }
+
+        // Parse dates properly - validation returns Date objects, but we need to normalize to UTC midnight
+        let start, end;
+        
+        try {
+            // Convert to string first if it's a Date object, then parse properly
+            let startDateStr, endDateStr;
+            
+            if (startDate instanceof Date) {
+                // Extract date components from Date object (using UTC methods to avoid timezone issues)
+                const year = startDate.getUTCFullYear();
+                const month = startDate.getUTCMonth();
+                const day = startDate.getUTCDate();
+                start = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+            } else if (typeof startDate === 'string') {
+                // Parse string date - ensure it's in YYYY-MM-DD format
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+                    return res.status(400).json({ message: "startDate must be in YYYY-MM-DD format." });
+                }
+                start = new Date(startDate + 'T00:00:00.000Z');
+            } else {
+                return res.status(400).json({ message: "Invalid startDate format." });
+            }
+            
+            if (endDate instanceof Date) {
+                // Extract date components from Date object (using UTC methods to avoid timezone issues)
+                const year = endDate.getUTCFullYear();
+                const month = endDate.getUTCMonth();
+                const day = endDate.getUTCDate();
+                end = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+            } else if (typeof endDate === 'string') {
+                // Parse string date - ensure it's in YYYY-MM-DD format
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+                    return res.status(400).json({ message: "endDate must be in YYYY-MM-DD format." });
+                }
+                end = new Date(endDate + 'T00:00:00.000Z');
+            } else {
+                return res.status(400).json({ message: "Invalid endDate format." });
+            }
+
+            // Validate dates are valid
+            if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+                return res.status(400).json({ message: "Invalid date values provided." });
+            }
+
+            // Ensure end date is after start date
+            if (end <= start) {
+                return res.status(400).json({ message: "endDate must be after startDate." });
+            }
+        } catch (dateError) {
+            console.error("Date parsing error:", dateError);
+            return res.status(400).json({ message: "Error parsing dates: " + dateError.message });
+        }
+
+        // Fetch rates for the date range
+        const rates = await DailyRate.find({
+            roomType: roomTypeId,
+            property: propertyId,
+            date: { $gte: start, $lt: end }
+        }).select('date adultRate childRate baseRate extraGuestRate -_id').sort({ date: 1 });
+
+        // Format rates as a map by date string
+        const ratesMap = {};
+        let currentDate = new Date(start);
+        
+        while (currentDate < end) {
+            const dateStr = currentDate.toISOString().split('T')[0];
+            const rateForDate = rates.find(r => r.date.toISOString().split('T')[0] === dateStr);
+            
+            if (rateForDate) {
+                // Use rate from database
+                if (roomType.priceModel === 'perPerson') {
+                    ratesMap[dateStr] = {
+                        adultRate: rateForDate.adultRate,
+                        childRate: rateForDate.childRate
+                    };
+                } else {
+                    ratesMap[dateStr] = {
+                        baseRate: rateForDate.baseRate,
+                        extraGuestRate: rateForDate.extraGuestRate
+                    };
+                }
+            } else {
+                // Use default rates from room type if no specific rate set
+                if (roomType.priceModel === 'perPerson') {
+                    ratesMap[dateStr] = {
+                        adultRate: roomType.adultRate || 0,
+                        childRate: roomType.childRate || 0
+                    };
+                } else {
+                    ratesMap[dateStr] = {
+                        baseRate: roomType.baseRate || 0,
+                        extraGuestRate: roomType.extraGuestRate || 0
+                    };
+                }
+            }
+            
+            currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+        }
+
+        res.status(200).json({
+            roomTypeId,
+            priceModel: roomType.priceModel,
+            rates: ratesMap
+        });
+    } catch (error) {
+        console.error("Get Rates for Date Range Error:", error);
+        console.error("Error stack:", error.stack);
+        console.error("Request query:", req.query);
+        res.status(500).json({ 
+            message: "Server error fetching rates for date range.",
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+
 module.exports = router;

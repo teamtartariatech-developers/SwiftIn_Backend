@@ -45,7 +45,17 @@ const guestFolioSchema = new mongoose.Schema({
     reservationId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Reservations',
-        required: true
+        required: false // Optional for paymaster folios
+    },
+    paymasterId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'PaymasterRoom',
+        required: false // Optional for guest folios
+    },
+    groupId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'GroupReservation',
+        required: false // Optional for group folios
     },
     guestName: {
         type: String,

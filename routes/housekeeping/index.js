@@ -1,7 +1,7 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
-const { broadcastHousekeepingMessage } = require('../../services/housekeepingWebsocket');
+const { broadcastHousekeepingMessage } = require('../../services/websocketManager');
 const { validateAndSetDefaults, isValidObjectId } = require('../../utils/validation');
 
 const router = express.Router();

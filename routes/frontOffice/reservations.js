@@ -468,6 +468,68 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ message: dateValidation.errors.join(', ') });
         }
 
+        // Validate minimum stay requirement
+        const RoomType = getModel(req, 'RoomType');
+        const roomType = await RoomType.findOne({
+            _id: validation.validated.roomType,
+            property: getPropertyId(req),
+        });
+
+        if (!roomType) {
+            return res.status(404).json({ message: 'Room type not found.' });
+        }
+
+        // Check minimum stay requirement
+        const checkIn = dateValidation.checkIn;
+        const checkOut = dateValidation.checkOut;
+        const nights = Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24));
+        
+        if (roomType.minimumStay && nights < roomType.minimumStay) {
+            return res.status(400).json({ 
+                message: `Minimum stay requirement is ${roomType.minimumStay} night(s). Selected stay is ${nights} night(s).` 
+            });
+        }
+
+        // Validate maximum stay requirement (if set)
+        if (roomType.maximumStay && nights > roomType.maximumStay) {
+            return res.status(400).json({ 
+                message: `Maximum stay allowed is ${roomType.maximumStay} night(s). Selected stay is ${nights} night(s).` 
+            });
+        }
+
+        // Validate deposit policy
+        const PropertyDetails = getModel(req, 'PropertyDetails');
+        const propertyDetails = await PropertyDetails.findOne({
+            property: getPropertyId(req),
+        });
+
+        const depositPolicy = propertyDetails?.depositPolicy || 'none'; // 'none', 'percentage', 'fixed', 'first_night'
+        const depositAmount = propertyDetails?.depositAmount || 0;
+        const depositPercentage = propertyDetails?.depositPercentage || 0;
+        
+        let requiredDeposit = 0;
+        if (depositPolicy === 'percentage' && depositPercentage > 0) {
+            requiredDeposit = (validation.validated.totalAmount * depositPercentage) / 100;
+        } else if (depositPolicy === 'fixed' && depositAmount > 0) {
+            requiredDeposit = depositAmount;
+        } else if (depositPolicy === 'first_night') {
+            // Calculate first night charge
+            if (roomType.priceModel === 'perRoom') {
+                requiredDeposit = roomType.baseRate * (validation.validated.numberOfRooms || 1);
+            } else if (roomType.priceModel === 'perPerson') {
+                const adultCount = validation.validated.adultCount || validation.validated.numberOfAdults || 0;
+                const childCount = validation.validated.childCount || validation.validated.numberOfChildren || 0;
+                requiredDeposit = (roomType.adultRate || 0) * adultCount + (roomType.childRate || 0) * childCount;
+            }
+        }
+
+        // Warn if deposit is less than required (but allow override for now - can be made strict)
+        if (requiredDeposit > 0 && validation.validated.payedAmount < requiredDeposit) {
+            // For production, you might want to make this strict:
+            // return res.status(400).json({ message: `Deposit required: ₹${requiredDeposit.toFixed(2)}. Provided: ₹${validation.validated.payedAmount.toFixed(2)}` });
+            console.warn(`Deposit policy: Required ₹${requiredDeposit.toFixed(2)}, provided ₹${validation.validated.payedAmount.toFixed(2)}`);
+        }
+
         // Normalize payment method
         validation.validated.paymentMethod = normalizePaymentMethod(validation.validated.paymentMethod);
 
@@ -784,7 +846,9 @@ router.get('/:id', async (req, res) => {
         const reservation = await Reservations.findOne({
             _id: id,
             property: getPropertyId(req),
-        });
+        })
+        .populate('roomType', 'name')
+        .populate('roomNumbers', 'roomNumber');
 
         if (!reservation) {
             return res.status(404).json({ message: 'Reservation not found.' });
@@ -872,6 +936,128 @@ router.put('/:id', async (req, res) => {
     }
 });
 
+// Cancel reservation endpoint
+router.post('/:id/cancel', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid reservation ID format' });
+        }
+        
+        const Reservations = getModel(req, 'Reservations');
+        const reservation = await Reservations.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+
+        if (!reservation) {
+            return res.status(404).json({ message: 'Reservation not found.' });
+        }
+
+        // Cannot cancel already checked-out or cancelled reservations
+        if (reservation.status === 'checked-out') {
+            return res.status(400).json({ message: 'Cannot cancel a checked-out reservation.' });
+        }
+        
+        if (reservation.status === 'cancelled') {
+            return res.status(400).json({ message: 'Reservation is already cancelled.' });
+        }
+
+        // Get cancellation policy from settings (if available)
+        const PropertyDetails = getModel(req, 'PropertyDetails');
+        const propertyDetails = await PropertyDetails.findOne({
+            property: getPropertyId(req),
+        });
+
+        // Calculate cancellation fee based on policy
+        let cancellationFee = 0;
+        const checkInDate = new Date(reservation.checkInDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        checkInDate.setHours(0, 0, 0, 0);
+        const daysUntilCheckIn = Math.ceil((checkInDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+        // Default cancellation policy: Free cancellation if > 24 hours before check-in
+        // Otherwise, charge first night or percentage based on property settings
+        if (daysUntilCheckIn <= 0) {
+            // Same day or past check-in date - full charge
+            cancellationFee = reservation.totalAmount || 0;
+        } else if (daysUntilCheckIn === 1) {
+            // Less than 24 hours - charge first night
+            const RoomType = getModel(req, 'RoomType');
+            const roomType = await RoomType.findOne({ _id: reservation.roomType, property: getPropertyId(req) });
+            if (roomType) {
+                cancellationFee = roomType.baseRate * (reservation.numberOfRooms || 1);
+            }
+        }
+        // More than 24 hours - no fee (can be customized based on property policy)
+
+        // Update reservation status
+        reservation.status = 'cancelled';
+        reservation.cancelledAt = new Date();
+        reservation.cancellationFee = cancellationFee;
+        await reservation.save();
+
+        // If rooms were assigned, mark them as available (clean)
+        if (reservation.roomNumbers && reservation.roomNumbers.length > 0) {
+            const Rooms = getModel(req, 'Rooms');
+            try {
+                const rooms = await Rooms.find({
+                    _id: { $in: reservation.roomNumbers },
+                    property: getPropertyId(req)
+                });
+                for (const room of rooms) {
+                    if (room.status === 'occupied') {
+                        room.status = 'clean'; // Mark as clean since guest never checked in
+                        await room.save();
+                    }
+                }
+            } catch (roomError) {
+                console.error('Error updating room statuses during cancellation:', roomError);
+            }
+        }
+
+        // Send cancellation email if guest email exists
+        if (reservation.guestEmail) {
+            try {
+                const EmailTemplate = getModel(req, 'EmailTemplate');
+                const template = await EmailTemplate.findOne({
+                    template_name: 'cancellationMail',
+                    property: getPropertyId(req),
+                });
+
+                if (template?.content) {
+                    const variables = {
+                        guestName: reservation.guestName || '',
+                        reservationId: reservation._id,
+                        checkInDate: reservation.checkInDate ? new Date(reservation.checkInDate).toLocaleDateString('en-GB') : '',
+                        cancellationFee: cancellationFee > 0 ? cancellationFee.toFixed(2) : '0',
+                        refundAmount: cancellationFee > 0 ? ((reservation.payedAmount || 0) - cancellationFee).toFixed(2) : (reservation.payedAmount || 0).toFixed(2),
+                    };
+
+                    const htmlBody = compileTemplate(template.content, variables);
+                    const subject = template.subject || 'Reservation Cancellation';
+                    await emailService.sendEmail(req.tenant, reservation.guestEmail, subject, htmlBody, {});
+                }
+            } catch (emailError) {
+                console.error('Error sending cancellation email:', emailError);
+            }
+        }
+
+        res.status(200).json({
+            message: 'Reservation cancelled successfully.',
+            reservation: reservation,
+            cancellationFee: cancellationFee,
+            refundAmount: Math.max(0, (reservation.payedAmount || 0) - cancellationFee)
+        });
+    } catch (error) {
+        console.error('Error cancelling reservation:', error);
+        res.status(500).json({ message: 'Server error cancelling reservation.' });
+    }
+});
+
 router.delete('/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -882,19 +1068,123 @@ router.delete('/:id', async (req, res) => {
         }
         
         const Reservations = getModel(req, 'Reservations');
+        const reservation = await Reservations.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+
+        if (!reservation) {
+            return res.status(404).json({ message: 'Reservation not found.' });
+        }
+
+        // Only allow deletion of cancelled or confirmed reservations (not checked-in/out)
+        if (reservation.status === 'checked-in' || reservation.status === 'checked-out') {
+            return res.status(400).json({ 
+                message: 'Cannot delete checked-in or checked-out reservations. Cancel them instead.' 
+            });
+        }
+
         const result = await Reservations.findOneAndDelete({
             _id: id,
             property: getPropertyId(req),
         });
 
-        if (!result) {
-            return res.status(404).json({ message: 'Reservation not found.' });
-        }
-
         res.status(200).json({ message: 'Reservation deleted successfully.' });
     } catch (error) {
         console.error('Error deleting reservation:', error);
         res.status(500).json({ message: 'Server error deleting reservation.' });
+    }
+});
+
+// Add note to reservation
+router.post('/:id/notes', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { content } = req.body;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid reservation ID format' });
+        }
+        
+        if (!content || typeof content !== 'string' || content.trim().length === 0) {
+            return res.status(400).json({ message: 'Note content is required and cannot be empty' });
+        }
+        
+        const Reservations = getModel(req, 'Reservations');
+        const reservation = await Reservations.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+
+        if (!reservation) {
+            return res.status(404).json({ message: 'Reservation not found.' });
+        }
+
+        // Add note
+        const newNote = {
+            content: content.trim(),
+            createdBy: req.user.userId,
+            createdAt: new Date()
+        };
+
+        if (!reservation.notes) {
+            reservation.notes = [];
+        }
+        reservation.notes.push(newNote);
+        await reservation.save();
+
+        res.status(200).json({ 
+            message: 'Note added successfully.',
+            note: newNote,
+            reservation: reservation
+        });
+    } catch (error) {
+        console.error('Error adding note:', error);
+        res.status(500).json({ message: 'Server error adding note.' });
+    }
+});
+
+// Delete note from reservation
+router.delete('/:id/notes/:noteId', async (req, res) => {
+    try {
+        const { id, noteId } = req.params;
+        
+        // Validate ObjectIds
+        if (!isValidObjectId(id) || !isValidObjectId(noteId)) {
+            return res.status(400).json({ message: 'Invalid ID format' });
+        }
+        
+        const Reservations = getModel(req, 'Reservations');
+        const reservation = await Reservations.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+
+        if (!reservation) {
+            return res.status(404).json({ message: 'Reservation not found.' });
+        }
+
+        if (!reservation.notes || reservation.notes.length === 0) {
+            return res.status(404).json({ message: 'No notes found.' });
+        }
+
+        // Remove note
+        const noteIndex = reservation.notes.findIndex(note => note._id.toString() === noteId);
+        if (noteIndex === -1) {
+            return res.status(404).json({ message: 'Note not found.' });
+        }
+
+        reservation.notes.splice(noteIndex, 1);
+        await reservation.save();
+
+        res.status(200).json({ 
+            message: 'Note deleted successfully.',
+            reservation: reservation
+        });
+    } catch (error) {
+        console.error('Error deleting note:', error);
+        res.status(500).json({ message: 'Server error deleting note.' });
     }
 });
 

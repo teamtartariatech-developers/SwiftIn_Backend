@@ -106,3 +106,4 @@ module.exports = User;
 module.exports.schema = userSchema;
 module.exports.ROLE_MODULES = ROLE_MODULES;
 module.exports.MODULE_OPTIONS = MODULE_OPTIONS;
+module.exports.ROLE_OPTIONS = ROLE_OPTIONS;

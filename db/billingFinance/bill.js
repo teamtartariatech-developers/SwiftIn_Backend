@@ -49,7 +49,12 @@ const billSchema = new mongoose.Schema({
     reservationId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Reservations',
-        required: true
+        required: false // Optional for paymaster invoices
+    },
+    paymasterId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'PaymasterRoom',
+        required: false // Optional for guest invoices
     },
     guestName: {
         type: String,

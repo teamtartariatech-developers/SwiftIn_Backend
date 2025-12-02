@@ -3,14 +3,59 @@ const bodyParser = require('body-parser');
 const router = express.Router();
 const emailService = require('../../services/emailService');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
-const { validateAndSetDefaults, validatePagination, isValidObjectId, isValidEmail, isValidPhone } = require('../../utils/validation');
+const { getTenantContext } = require('../../services/tenantManager');
+const {
+    validateAndSetDefaults,
+    validatePagination,
+    isValidObjectId,
+    isValidEmail,
+    isValidPhone,
+} = require('../../utils/validation');
 
 router.use(bodyParser.json());
-router.use(authenticate);
-router.use(requireModuleAccess('guest-management'));
 
 const getModel = (req, name) => req.tenant.models[name];
 const getPropertyId = (req) => req.tenant.property._id;
+
+// Lightweight 1x1 transparent GIF for open tracking
+const OPEN_PIXEL_BUFFER = Buffer.from(
+    'R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==',
+    'base64'
+);
+
+// Public (unauthenticated) tracking pixel endpoint for campaign opens
+router.get('/open', async (req, res) => {
+    try {
+        const { code, cid } = req.query;
+
+        if (!code || !cid || !isValidObjectId(cid)) {
+            res.set('Content-Type', 'image/gif');
+            res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+            res.set('Content-Length', OPEN_PIXEL_BUFFER.length);
+            return res.status(200).end(OPEN_PIXEL_BUFFER);
+        }
+
+        const normalizedCode = String(code).toUpperCase().trim();
+        const { models } = await getTenantContext(normalizedCode);
+        const Campaign = models.Campaign;
+
+        if (Campaign) {
+            await Campaign.findByIdAndUpdate(cid, { $inc: { opened: 1 } }).catch(() => {});
+        }
+    } catch (error) {
+        console.error('Error tracking campaign open:', error);
+    } finally {
+        // Always return a tiny transparent GIF so emails render without errors
+        res.set('Content-Type', 'image/gif');
+        res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.set('Content-Length', OPEN_PIXEL_BUFFER.length);
+        res.status(200).end(OPEN_PIXEL_BUFFER);
+    }
+});
+
+// Authenticated routes below
+router.use(authenticate);
+router.use(requireModuleAccess('guest-management'));
 
 // ========== CONVERSATIONS ==========
 
@@ -604,9 +649,14 @@ router.post('/campaigns/:id/send', async (req, res) => {
             return res.status(400).json({ message: "No recipients found for this campaign." });
         }
         
-        // Prepare email content
+        // Prepare email content (inject tracking pixel for open-rate analytics)
         const subject = campaign.subject || 'Newsletter from Hotel';
-        const htmlContent = campaign.content || '';
+        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        const trackingUrl = `${baseUrl}/api/guestmanagement/communication/open?code=${encodeURIComponent(
+            req.tenant.property.code
+        )}&cid=${campaign._id.toString()}`;
+        const trackingPixelHtml = `<img src="${trackingUrl}" alt="" width="1" height="1" style="display:none;" />`;
+        const htmlContent = `${campaign.content || ''}${trackingPixelHtml}`;
         
         // Send emails using tenant-specific integration
         const emailResults = await emailService.sendBulkEmails(
@@ -622,7 +672,16 @@ router.post('/campaigns/:id/send', async (req, res) => {
         campaign.recipients = recipients.length;
         campaign.delivered = emailResults.sent;
         campaign.bounced = emailResults.failed;
-        
+
+        // Bump template usage metrics if this campaign was created from a template
+        if (campaign.templateId && req.tenant?.models?.MessageTemplate) {
+            const MessageTemplate = req.tenant.models.MessageTemplate;
+            await MessageTemplate.findByIdAndUpdate(campaign.templateId, {
+                $inc: { usageCount: 1 },
+                $set: { lastUsedAt: new Date() },
+            }).catch(() => {});
+        }
+
         await campaign.save();
         
         res.status(200).json({ 
@@ -643,6 +702,75 @@ router.post('/campaigns/:id/send', async (req, res) => {
             });
         }
         res.status(500).json({ message: "Server error sending campaign.", error: error.message });
+    }
+});
+
+// Estimate recipients for a potential campaign audience (no email sending)
+router.post('/campaigns/estimate', async (req, res) => {
+    try {
+        const { audience } = req.body || {};
+
+        if (!audience || !audience.type) {
+            return res.status(400).json({ message: 'Audience configuration is required.' });
+        }
+
+        const propertyId = getPropertyId(req);
+        const GuestProfiles = getModel(req, 'GuestProfiles');
+
+        let totalRecipients = 0;
+
+        if (audience.type === 'custom') {
+            const customRecipients = Array.isArray(audience.customRecipients)
+                ? audience.customRecipients
+                : [];
+            totalRecipients = customRecipients.filter((r) => r?.email).length;
+        } else {
+            let query = { property: propertyId };
+
+            if (audience.type === 'all') {
+                query = { property: propertyId };
+            } else if (audience.type === 'segment' && audience.segment) {
+                const segmentConditions = [];
+
+                if (Array.isArray(audience.segment.guestType) && audience.segment.guestType.length > 0) {
+                    segmentConditions.push({ guestType: { $in: audience.segment.guestType } });
+                }
+
+                if (Array.isArray(audience.segment.tags) && audience.segment.tags.length > 0) {
+                    segmentConditions.push({ tags: { $in: audience.segment.tags } });
+                }
+
+                if (audience.segment.minVisits) {
+                    query.totalVisits = { $gte: audience.segment.minVisits };
+                }
+                if (audience.segment.minSpend) {
+                    query.totalSpend = { $gte: audience.segment.minSpend };
+                }
+                if (audience.segment.lastVisitDays) {
+                    const dateThreshold = new Date();
+                    dateThreshold.setDate(dateThreshold.getDate() - audience.segment.lastVisitDays);
+                    query['records.checkOutDate'] = { $gte: dateThreshold };
+                }
+
+                if (segmentConditions.length > 0) {
+                    if (segmentConditions.length === 1) {
+                        Object.assign(query, segmentConditions[0]);
+                    } else {
+                        query.$or = segmentConditions;
+                    }
+                }
+            }
+
+            totalRecipients = await GuestProfiles.countDocuments(query);
+        }
+
+        return res.status(200).json({
+            totalRecipients,
+            audienceType: audience.type,
+        });
+    } catch (error) {
+        console.error('Error estimating campaign recipients:', error);
+        res.status(500).json({ message: 'Server error estimating recipients.' });
     }
 });
 

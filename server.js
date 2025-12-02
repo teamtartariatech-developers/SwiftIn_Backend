@@ -18,7 +18,12 @@ const auth = require('./routes/auth/auth');
 const reports = require('./routes/reports/reports');
 const mailer = require('./routes/mailer');
 const housekeeping = require('./routes/housekeeping');
-const { initHousekeepingWebsocket } = require('./services/housekeepingWebsocket');
+const nightAudit = require('./routes/nightAudit/nightAudit');
+const cityLedger = require('./routes/cityLedger/cityLedger');
+const travelAgent = require('./routes/travelAgent/travelAgent');
+const paymaster = require('./routes/paymaster/paymaster');
+const groupReservation = require('./routes/groupReservation/groupReservation');
+const { initWebsockets } = require('./services/websocketManager');
 
 app.use(express.json());
 
@@ -56,12 +61,17 @@ app.use('/api/auth', auth);
 app.use('/api/reports', reports);
 app.use('/api/mailer', mailer);
 app.use('/api/housekeeping', housekeeping);
+app.use('/api/reports/night-audit', nightAudit);
+app.use('/api/city-ledger', cityLedger);
+app.use('/api/travel-agent', travelAgent);
+app.use('/api/paymaster', paymaster);
+app.use('/api/group-reservation', groupReservation);
 // app.use('/frontoffice', frontRouter);
 // app.use('/distribution', distRouter);
 
 
 const server = http.createServer(app);
-initHousekeepingWebsocket(server);
+initWebsockets(server);
 
 const port = process.env.Port || 3000;
 server.listen(port, () => { 

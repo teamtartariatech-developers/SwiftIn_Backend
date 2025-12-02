@@ -41,6 +41,11 @@ function loadBaseSchema(modelName) {
         Promotion: require('../db/promotion').schema,
         MaintenanceLog: require('../db/housekeeping/maintenanceLog').schema,
         HousekeepingMessage: require('../db/housekeeping/message').schema,
+        NightAudit: require('../db/nightAudit').schema,
+        CityLedgerAccount: require('../db/cityLedger').schema,
+        TravelAgent: require('../db/travelAgent').schema,
+        PaymasterRoom: require('../db/paymaster').schema,
+        GroupReservation: require('../db/groupReservation').schema,
     };
 
     const schema = schemaMap[modelName];
@@ -92,6 +97,11 @@ function registerModels(connection) {
         'Promotion',
         'MaintenanceLog',
         'HousekeepingMessage',
+        'NightAudit',
+        'CityLedgerAccount',
+        'TravelAgent',
+        'PaymasterRoom',
+        'GroupReservation',
     ].forEach((name) => {
         if (!connection.models[name]) {
             const baseSchema = loadBaseSchema(name);

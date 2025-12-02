@@ -23,12 +23,15 @@ router.get('/', async (req, res) => {
             query.$or = [
                 { guestName: { $regex: search, $options: 'i' } },
                 { roomNumber: { $regex: search, $options: 'i' } },
-                { folioId: { $regex: search, $options: 'i' } }
+                { folioId: { $regex: search, $options: 'i' } },
+                { 'roomNumbers': { $regex: search, $options: 'i' } }
             ];
         }
         
         const folios = await GuestFolio.find(query)
             .populate('reservationId')
+            .populate('paymasterId')
+            .populate('groupId')
             .sort({ createdAt: -1 });
         
         res.status(200).json(folios);
@@ -52,7 +55,7 @@ router.get('/:id', async (req, res) => {
         const folio = await GuestFolio.findOne({
             _id: id,
             property: getPropertyId(req),
-        }).populate('reservationId');
+        }).populate('reservationId').populate('paymasterId').populate('groupId');
         
         if (!folio) {
             return res.status(404).json({ message: "Folio not found." });
@@ -410,6 +413,36 @@ router.post('/:id/charges', async (req, res) => {
         folio.calculateBalance();
         await folio.save();
         
+        // Update paymaster totals if this is a paymaster folio
+        if (folio.paymasterId) {
+            try {
+                const PaymasterRoom = getModel(req, 'PaymasterRoom');
+                const paymaster = await PaymasterRoom.findOne({
+                    _id: folio.paymasterId,
+                    property: getPropertyId(req)
+                });
+                if (paymaster) {
+                    // Sync charges from folio to paymaster
+                    paymaster.charges = folio.items.map(item => ({
+                        description: item.description,
+                        date: item.date,
+                        amount: item.amount,
+                        department: item.department,
+                        quantity: item.quantity,
+                        unitPrice: item.unitPrice,
+                        tax: item.tax,
+                        discount: item.discount,
+                        notes: item.notes
+                    }));
+                    paymaster.calculateBalance();
+                    await paymaster.save();
+                }
+            } catch (paymasterError) {
+                console.error('Error updating paymaster:', paymasterError);
+                // Don't fail the charge addition if paymaster update fails
+            }
+        }
+        
         res.status(200).json(folio);
     } catch (error) {
         console.error('Error adding charge:', error);
@@ -465,6 +498,32 @@ router.post('/:id/payments', async (req, res) => {
         
         folio.calculateBalance();
         await folio.save();
+        
+        // Update paymaster totals if this is a paymaster folio
+        if (folio.paymasterId) {
+            try {
+                const PaymasterRoom = getModel(req, 'PaymasterRoom');
+                const paymaster = await PaymasterRoom.findOne({
+                    _id: folio.paymasterId,
+                    property: getPropertyId(req)
+                });
+                if (paymaster) {
+                    // Sync payments from folio to paymaster
+                    paymaster.payments = folio.payments.map(payment => ({
+                        date: payment.date,
+                        method: payment.method,
+                        amount: payment.amount,
+                        transactionId: payment.transactionId,
+                        notes: payment.notes
+                    }));
+                    paymaster.calculateBalance();
+                    await paymaster.save();
+                }
+            } catch (paymasterError) {
+                console.error('Error updating paymaster:', paymasterError);
+                // Don't fail the payment addition if paymaster update fails
+            }
+        }
         
         res.status(200).json(folio);
     } catch (error) {
@@ -547,10 +606,97 @@ router.post('/:id/checkout', async (req, res) => {
         // Calculate final balance
         folio.calculateBalance();
         
-        // Check if balance is settled
-        if (folio.balance > 0) {
+        // Check if balance is settled (allow small rounding differences)
+        const balanceThreshold = 0.01; // Allow 1 paisa difference for rounding
+        if (folio.balance > balanceThreshold) {
             return res.status(400).json({ 
-                message: `Cannot checkout with outstanding balance of ₹${folio.balance.toFixed(2)}` 
+                message: `Cannot checkout with outstanding balance of ₹${folio.balance.toFixed(2)}. Please settle the balance first.` 
+            });
+        }
+        
+        // Handle early checkout - adjust charges if checkout is before scheduled check-out date
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const scheduledCheckOut = new Date(folio.checkOut);
+        scheduledCheckOut.setHours(0, 0, 0, 0);
+        
+        if (today < scheduledCheckOut) {
+            // Early checkout - calculate refund for unused nights
+            const nightsUsed = Math.ceil((today.getTime() - new Date(folio.checkIn).getTime()) / (1000 * 60 * 60 * 24));
+            const scheduledNights = Math.ceil((scheduledCheckOut.getTime() - new Date(folio.checkIn).getTime()) / (1000 * 60 * 60 * 24));
+            const unusedNights = scheduledNights - nightsUsed;
+            
+            if (unusedNights > 0) {
+                // Calculate refund amount (proportional to accommodation charges)
+                const accommodationCharges = folio.items
+                    .filter(item => item.description.toLowerCase().includes('accommodation'))
+                    .reduce((sum, item) => sum + (item.amount * (item.quantity || 1)), 0);
+                
+                const refundAmount = (accommodationCharges / scheduledNights) * unusedNights;
+                
+                // Add refund as a negative charge or payment adjustment
+                if (refundAmount > 0) {
+                    folio.items.push({
+                        description: `Early Checkout Refund (${unusedNights} unused night${unusedNights > 1 ? 's' : ''})`,
+                        date: today,
+                        amount: -refundAmount, // Negative amount for refund
+                        department: 'Room',
+                        quantity: 1,
+                        unitPrice: -refundAmount
+                    });
+                    
+                    // Recalculate balance after refund
+                    folio.calculateBalance();
+                    console.log(`Early checkout detected: Refund of ₹${refundAmount.toFixed(2)} for ${unusedNights} unused night(s)`);
+                }
+            }
+        }
+        
+        // Handle late checkout - add late checkout fee if applicable
+        const checkOutTime = new Date();
+        const scheduledCheckOutTime = new Date(folio.checkOut);
+        // Default checkout time is 11:00 AM
+        scheduledCheckOutTime.setHours(11, 0, 0, 0);
+        
+        // Check if checkout is after scheduled checkout time (e.g., after 11 AM)
+        if (checkOutTime > scheduledCheckOutTime) {
+            const PropertyDetails = getModel(req, 'PropertyDetails');
+            const propertyDetails = await PropertyDetails.findOne({
+                property: propertyId,
+            });
+            
+            const lateCheckoutFee = propertyDetails?.lateCheckoutFee || 0;
+            const lateCheckoutFeePerHour = propertyDetails?.lateCheckoutFeePerHour || 0;
+            
+            if (lateCheckoutFee > 0 || lateCheckoutFeePerHour > 0) {
+                let feeAmount = 0;
+                if (lateCheckoutFeePerHour > 0) {
+                    const hoursLate = Math.ceil((checkOutTime.getTime() - scheduledCheckOutTime.getTime()) / (1000 * 60 * 60));
+                    feeAmount = lateCheckoutFeePerHour * hoursLate;
+                } else {
+                    feeAmount = lateCheckoutFee;
+                }
+                
+                if (feeAmount > 0) {
+                    folio.items.push({
+                        description: `Late Checkout Fee`,
+                        date: checkOutTime,
+                        amount: feeAmount,
+                        department: 'Room',
+                        quantity: 1,
+                        unitPrice: feeAmount
+                    });
+                    
+                    folio.calculateBalance();
+                    console.log(`Late checkout fee added: ₹${feeAmount.toFixed(2)}`);
+                }
+            }
+        }
+        
+        // Final balance check after adjustments
+        if (folio.balance > balanceThreshold) {
+            return res.status(400).json({ 
+                message: `Cannot checkout with outstanding balance of ₹${folio.balance.toFixed(2)} after adjustments. Please settle the balance first.` 
             });
         }
         
@@ -558,10 +704,9 @@ router.post('/:id/checkout', async (req, res) => {
         const billId = await Bill.generateBillId(propertyId);
         
         // Create permanent bill from folio
-        const bill = new Bill({
+        const billData = {
             billId,
             folioId: folio.folioId,
-            reservationId: folio.reservationId,
             guestName: folio.guestName,
             guestEmail: folio.guestEmail,
             guestPhone: folio.guestPhone,
@@ -577,19 +722,63 @@ router.post('/:id/checkout', async (req, res) => {
             checkoutDate: new Date(),
             archivedAt: new Date(),
             property: propertyId
-        });
+        };
         
+        // Handle paymaster vs guest folio
+        if (folio.paymasterId) {
+            billData.paymasterId = folio.paymasterId;
+            // For paymaster invoices, use paymaster name
+            const PaymasterRoom = getModel(req, 'PaymasterRoom');
+            const paymaster = await PaymasterRoom.findOne({
+                _id: folio.paymasterId,
+                property: propertyId
+            });
+            if (paymaster) {
+                billData.guestName = paymaster.name; // Use paymaster name
+                // Update paymaster status to closed
+                paymaster.status = 'closed';
+                await paymaster.save();
+            }
+        } else {
+            billData.reservationId = folio.reservationId;
+            // Update reservation status to checked-out
+            if (folio.reservationId) {
+                await Reservations.findOneAndUpdate(
+                    { _id: folio.reservationId, property: propertyId },
+                    { status: 'checked-out' }
+                );
+            }
+        }
+        
+        // CRITICAL: Update room statuses to 'dirty' when guest checks out
+        // This is essential for housekeeping workflow
+        const Rooms = getModel(req, 'Rooms');
+        if (folio.roomNumbers && folio.roomNumbers.length > 0) {
+            try {
+                // Find rooms by room numbers
+                const rooms = await Rooms.find({
+                    roomNumber: { $in: folio.roomNumbers },
+                    property: propertyId
+                });
+                
+                // Update each room status to 'dirty' (needs cleaning)
+                for (const room of rooms) {
+                    room.status = 'dirty';
+                    await room.save();
+                }
+                console.log(`Updated ${rooms.length} room(s) status to 'dirty' after checkout`);
+            } catch (roomError) {
+                console.error('Error updating room statuses during checkout:', roomError);
+                // Don't fail checkout if room status update fails, but log it
+            }
+        }
+        
+        const bill = new Bill(billData);
         await bill.save();
         
         // Update folio status to archived
         folio.status = 'archived';
         await folio.save();
-        
-        // Update reservation status to checked-out
-        await Reservations.findOneAndUpdate(
-            { _id: folio.reservationId, property: propertyId },
-            { status: 'checked-out' }
-        );
         
         res.status(200).json({
             message: "Folio settled and archived successfully",

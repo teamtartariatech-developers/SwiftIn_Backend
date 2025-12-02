@@ -33,6 +33,7 @@ router.post('/check-availability', requireModuleAccess('front-office'), async (r
         const propertyId = getPropertyId(req);
         const RoomType = getModel(req, 'RoomType');
         const Reservation = getModel(req, 'Reservations');
+        const InventoryBlock = getModel(req, 'InventoryBlock');
         
         const roomTypeId = validation.validated.roomTypeId;
         const requestedCheckIn = dateValidation.checkIn;
@@ -54,6 +55,20 @@ router.post('/check-availability', requireModuleAccess('front-office'), async (r
             checkOutDate: { $gt: requestedCheckIn }
         }).select('checkInDate checkOutDate numberOfRooms').lean();
 
+        // --- Get Blocked Inventory for the Date Range ---
+        const inventoryBlocks = await InventoryBlock.find({
+            roomType: roomTypeId,
+            property: propertyId,
+            date: { $gte: requestedCheckIn, $lt: requestedCheckOut }
+        }).select('date blockedInventory').lean();
+
+        // Create a map of blocked inventory by date
+        const blockedInventoryMap = {};
+        inventoryBlocks.forEach(block => {
+            const dateStr = block.date.toISOString().split('T')[0];
+            blockedInventoryMap[dateStr] = (blockedInventoryMap[dateStr] || 0) + (block.blockedInventory || 0);
+        });
+
         // --- Calculate Availability for Each Day ---
         let dailyAvailability = {};
         let isOverallAvailable = true; // Still useful to know if *at least one* room is free the whole time
@@ -72,10 +87,12 @@ router.post('/check-availability', requireModuleAccess('front-office'), async (r
                 }
             });
 
-            const availableCount = totalInventory - committedRoomsForDay;
-            // Ensure count doesn't go below 0
-            // const finalAvailableCount = Math.max(0, availableCount);
-            const finalAvailableCount =availableCount;
+            // Get blocked inventory for this date
+            const blockedForDay = blockedInventoryMap[dateStr] || 0;
+
+            // Calculate available: total - booked - blocked
+            const availableCount = totalInventory - committedRoomsForDay - blockedForDay;
+            const finalAvailableCount = Math.max(0, availableCount);
             dailyAvailability[dateStr] = finalAvailableCount;
 
             // Update overall flag based on whether *at least one* room is available

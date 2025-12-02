@@ -7,7 +7,16 @@ const { validateAndSetDefaults, validatePagination, isValidObjectId, isValidEmai
 
 router.use(bodyParser.json());
 router.use(authenticate);
-router.use(requireModuleAccess('guest-management'));
+// Note: create-or-update endpoint is accessible without guest-management module
+// because it's called during check-in process
+router.use((req, res, next) => {
+    // Allow create-or-update without guest-management module (needed for check-in)
+    if (req.path === '/create-or-update' && req.method === 'POST') {
+        return next();
+    }
+    // All other routes require guest-management module
+    return requireModuleAccess('guest-management')(req, res, next);
+});
 
 const getModel = (req, name) => req.tenant.models[name];
 const getPropertyId = (req) => req.tenant.property._id;
