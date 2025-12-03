@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paymaster Folio Statement - {{paymasterCode}}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333333;
+            background-color: #f4f4f4;
+            padding: 20px;
+        }
+        .email-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+        .header {
+            background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
+            color: #ffffff;
+            padding: 40px 30px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        .header p {
+            margin: 10px 0 0 0;
+            font-size: 14px;
+            opacity: 0.95;
+        }
+        .content {
+            padding: 40px 30px;
+        }
+        .greeting {
+            font-size: 18px;
+            margin-bottom: 25px;
+            color: #1f2a37;
+        }
+        .folio-info {
+            background-color: #f9f9f9;
+            border-left: 4px solid #7c3aed;
+            padding: 20px;
+            margin: 25px 0;
+            border-radius: 4px;
+        }
+        .folio-info h2 {
+            color: #7c3aed;
+            font-size: 20px;
+            margin-bottom: 15px;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        .info-label {
+            font-weight: 600;
+            color: #4b5563;
+            font-size: 14px;
+        }
+        .info-value {
+            color: #1f2a37;
+            font-size: 14px;
+            text-align: right;
+        }
+        .charges-section {
+            margin: 30px 0;
+        }
+        .charges-section h3 {
+            color: #1f2a37;
+            font-size: 18px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+        .charges-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background-color: #ffffff;
+        }
+        .charges-table thead {
+            background-color: #f9f9f9;
+        }
+        .charges-table th {
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #6b7280;
+            border-bottom: 2px solid #e5e7eb;
+        }
+        .charges-table td {
+            padding: 12px;
+            border-bottom: 1px solid #f3f4f6;
+            font-size: 14px;
+            color: #1f2a37;
+        }
+        .charges-table tbody tr:hover {
+            background-color: #f9f9f9;
+        }
+        .charges-table .amount {
+            text-align: right;
+            font-weight: 600;
+            color: #7c3aed;
+        }
+        .summary-box {
+            background-color: #f9f9f9;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 20px;
+            margin: 25px 0;
+        }
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            font-size: 14px;
+        }
+        .summary-row.total {
+            border-top: 2px solid #7c3aed;
+            margin-top: 10px;
+            padding-top: 15px;
+            font-size: 18px;
+            font-weight: 700;
+            color: #7c3aed;
+        }
+        .summary-row.balance {
+            border-top: 2px solid #f59e0b;
+            margin-top: 10px;
+            padding-top: 15px;
+            font-size: 18px;
+            font-weight: 700;
+            color: #f59e0b;
+        }
+        .summary-label {
+            color: #4b5563;
+        }
+        .summary-value {
+            font-weight: 600;
+            color: #1f2a37;
+        }
+        .footer {
+            background-color: #f9f9f9;
+            padding: 30px;
+            text-align: center;
+            color: #6b7280;
+            font-size: 12px;
+            border-top: 1px solid #e5e7eb;
+        }
+        .footer p {
+            margin: 5px 0;
+        }
+        .footer strong {
+            color: #1f2a37;
+            font-size: 14px;
+        }
+        @media only screen and (max-width: 600px) {
+            .email-container {
+                width: 100%;
+                border-radius: 0;
+            }
+            .content {
+                padding: 25px 20px;
+            }
+            .header {
+                padding: 30px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="header">
+            <h1>{{propertyName}}</h1>
+            <p>Paymaster Folio Statement</p>
+        </div>
+        
+        <div class="content">
+            <div class="greeting">
+                <p>Dear {{paymasterName}},</p>
+            </div>
+            
+            <p>Please find below your paymaster folio statement from {{propertyName}}.</p>
+            
+            <div class="folio-info">
+                <h2>Folio Information</h2>
+                <div class="info-row">
+                    <span class="info-label">Paymaster Code:</span>
+                    <span class="info-value">{{paymasterCode}}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Account Name:</span>
+                    <span class="info-value">{{paymasterName}}</span>
+                </div>
+                {{#if accountType}}
+                <div class="info-row">
+                    <span class="info-label">Account Type:</span>
+                    <span class="info-value">{{accountType}}</span>
+                </div>
+                {{/if}}
+                {{#if folioId}}
+                <div class="info-row">
+                    <span class="info-label">Folio ID:</span>
+                    <span class="info-value">{{folioId}}</span>
+                </div>
+                {{/if}}
+            </div>
+            
+            <div class="charges-section">
+                <h3>Charges Breakdown</h3>
+                {{chargesTable}}
+            </div>
+            
+            <div class="summary-box">
+                <div class="summary-row">
+                    <span class="summary-label">Total Charges:</span>
+                    <span class="summary-value">₹{{totalCharges}}</span>
+                </div>
+                <div class="summary-row">
+                    <span class="summary-label">Total Payments:</span>
+                    <span class="summary-value">₹{{totalPayments}}</span>
+                </div>
+                <div class="summary-row balance">
+                    <span class="summary-label">Balance:</span>
+                    <span class="summary-value">₹{{balance}}</span>
+                </div>
+            </div>
+            
+            <p style="margin-top: 25px;">If you have any questions regarding this folio, please do not hesitate to contact us.</p>
+            
+            <p style="margin-top: 20px;">
+                Best regards,<br>
+                <strong>{{propertyName}} Team</strong>
+            </p>
+        </div>
+        
+        <div class="footer">
+            <p><strong>{{propertyName}}</strong></p>
+            <p>{{propertyAddress}}</p>
+            <p>Phone: {{propertyPhone}} | Email: {{propertyEmail}}</p>
+            <p style="margin-top: 10px;">GSTIN: {{gstin}}</p>
+            <p style="margin-top: 15px; font-size: 11px; color: #9ca3af;">
+                This is an automated folio statement email. Please do not reply to this message.<br>
+                For inquiries, please contact us at {{propertyEmail}}
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+

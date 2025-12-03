@@ -46,7 +46,17 @@ async function authenticate(req, res, next) {
 
         next();
     } catch (error) {
-        console.error('Authentication error:', error);
+        // Only log non-network errors (network errors are usually transient DNS issues)
+        // Don't spam console with MongoDB connection retry errors
+        const isNetworkError = error?.message?.includes('ENOTFOUND') || 
+                              error?.message?.includes('getaddrinfo') ||
+                              error?.message?.includes('MongoServerSelectionError') ||
+                              error?.code === 'ENOTFOUND' ||
+                              error?.name === 'MongoServerSelectionError';
+        
+        if (!isNetworkError) {
+            console.error('Authentication error:', error.message || error);
+        }
         res.status(401).json({ message: 'Invalid token.' });
     }
 }

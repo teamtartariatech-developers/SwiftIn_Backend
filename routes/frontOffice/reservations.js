@@ -454,7 +454,7 @@ router.post('/', async (req, res) => {
             mealPlanNights: { type: 'number', default: 0, min: 0 },
             mealPlanRate: { type: 'number', default: 0, min: 0 },
             roomNumbers: { isArray: true, default: [] },
-            notes: { type: 'string', default: '' }
+            notes: { isArray: true, default: [] } // notes is an array of note objects, not a string
         };
 
         const validation = validateAndSetDefaults(req.body, reservationSchema);
@@ -548,23 +548,96 @@ router.post('/', async (req, res) => {
         }
 
         const Reservations = getModel(req, 'Reservations');
+        const Rooms = getModel(req, 'Rooms');
+        const propertyId = getPropertyId(req);
+        
+        // Auto-assign rooms for non-same-day reservations
+        const checkInDate = new Date(validation.validated.checkInDate);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        checkInDate.setHours(0, 0, 0, 0);
+        const isSameDay = checkInDate.getTime() === today.getTime();
+        
+        let assignedRoomIds = validation.validated.roomNumbers || [];
+        
+        // If not same-day and no rooms assigned, auto-assign sequentially
+        if (!isSameDay && (!assignedRoomIds || assignedRoomIds.length === 0)) {
+            const numberOfRooms = validation.validated.numberOfRooms || 1;
+            const roomTypeId = validation.validated.roomType;
+            
+            // Get all rooms of this type, sorted by room number
+            const allRooms = await Rooms.find({
+                roomType: roomTypeId,
+                property: propertyId,
+                status: { $nin: ['maintenance'] } // Exclude maintenance rooms
+            }).sort({ roomNumber: 1 }); // Sort by room number ascending
+            
+            // Find available rooms for the date range
+            const checkIn = dateValidation.checkIn;
+            const checkOut = dateValidation.checkOut;
+            
+            // Get conflicting reservations
+            const conflictingReservations = await Reservations.find({
+                property: propertyId,
+                roomType: roomTypeId,
+                checkInDate: { $lt: checkOut },
+                checkOutDate: { $gt: checkIn },
+                status: { $nin: ['cancelled', 'no-show'] }
+            });
+            
+            // Extract occupied room IDs
+            const occupiedRoomIds = new Set();
+            conflictingReservations.forEach(res => {
+                if (res.roomNumbers && Array.isArray(res.roomNumbers)) {
+                    res.roomNumbers.forEach(roomId => {
+                        occupiedRoomIds.add(roomId.toString());
+                    });
+                }
+            });
+            
+            // Find available rooms (not occupied and not in maintenance)
+            const availableRooms = allRooms.filter(room => {
+                const roomIdStr = room._id.toString();
+                return !occupiedRoomIds.has(roomIdStr);
+            });
+            
+            // Assign rooms sequentially from available rooms
+            if (availableRooms.length >= numberOfRooms) {
+                assignedRoomIds = availableRooms.slice(0, numberOfRooms).map(room => room._id);
+                console.log(`Auto-assigned ${numberOfRooms} room(s) for non-same-day reservation: ${assignedRoomIds.map(id => id.toString())}`);
+            } else {
+                console.warn(`Not enough available rooms. Required: ${numberOfRooms}, Available: ${availableRooms.length}`);
+                // Assign what we can, but reservation will be created without full room assignment
+                assignedRoomIds = availableRooms.map(room => room._id);
+            }
+        }
+        
+        // Ensure notes is an array (not a string)
+        const notesArray = Array.isArray(validation.validated.notes) 
+            ? validation.validated.notes 
+            : (validation.validated.notes && typeof validation.validated.notes === 'string' && validation.validated.notes.trim() 
+                ? [] // If it's a non-empty string, ignore it (notes should be added via notes API)
+                : []); // Default to empty array
+        
         const reservation = new Reservations({
             ...validation.validated,
             checkInDate: dateValidation.checkIn,
             checkOutDate: dateValidation.checkOut,
-            property: getPropertyId(req),
+            roomNumbers: assignedRoomIds, // Use auto-assigned or provided rooms
+            notes: notesArray, // Ensure notes is always an array
+            property: propertyId,
         });
 
         await reservation.save();
         
         // Check if check-in date is today - if so, create folio and guest profile automatically
         if (reservation.checkInDate) {
-            const checkInDate = new Date(reservation.checkInDate);
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-            checkInDate.setHours(0, 0, 0, 0);
+            const checkInDateCheck = new Date(reservation.checkInDate);
+            const todayCheck = new Date();
+            todayCheck.setHours(0, 0, 0, 0);
+            checkInDateCheck.setHours(0, 0, 0, 0);
             
-            if (checkInDate.getTime() === today.getTime()) {
+            if (checkInDateCheck.getTime() === todayCheck.getTime()) {
                 // Same day check-in, create folio automatically
                 await createFolioForReservation(req, reservation);
                 

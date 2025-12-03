@@ -320,6 +320,142 @@ router.post('/:id/payments', async (req, res) => {
     }
 });
 
+// Send paymaster folio email
+router.post('/:id/send-email', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const tenant = req.tenant;
+        
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid paymaster ID format' });
+        }
+        
+        const PaymasterRoom = getModel(req, 'PaymasterRoom');
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const EmailTemplate = getModel(req, 'EmailTemplate');
+        const PropertyDetails = getModel(req, 'PropertyDetails');
+        const emailService = require('../../services/emailService');
+        
+        // Find paymaster
+        const paymaster = await PaymasterRoom.findOne({
+            _id: id,
+            property: propertyId
+        });
+        
+        if (!paymaster) {
+            return res.status(404).json({ message: 'Paymaster room not found' });
+        }
+        
+        // Find associated folio
+        const folio = await GuestFolio.findOne({
+            paymasterId: id,
+            property: propertyId,
+            status: 'active'
+        }).populate('paymasterId');
+        
+        if (!folio) {
+            return res.status(404).json({ message: 'No active folio found for this paymaster' });
+        }
+        
+        // Get email template
+        const emailTemplate = await EmailTemplate.findOne({
+            template_name: 'paymasterFolioInvoice',
+            property: propertyId
+        });
+        
+        if (!emailTemplate) {
+            return res.status(404).json({ 
+                message: 'Email template "paymasterFolioInvoice" not found. Please add it to the database.' 
+            });
+        }
+        
+        // Get recipient email - paymaster folios use guestEmail field
+        const recipientEmail = folio.guestEmail || '';
+        
+        if (!recipientEmail) {
+            return res.status(400).json({ 
+                message: 'No email address found for this folio. Please add an email address to the folio.' 
+            });
+        }
+        
+        // Get property details
+        const propertyDetails = await PropertyDetails.findOne({ property: propertyId });
+        
+        // Prepare replacements
+        const replacements = {
+            folioId: folio.folioId,
+            guestName: folio.guestName,
+            paymasterCode: paymaster.paymasterCode || '',
+            paymasterName: paymaster.name || folio.guestName,
+            accountType: paymaster.accountType || '',
+            totalCharges: folio.totalCharges?.toLocaleString('en-IN') || '0',
+            totalPayments: folio.totalPayments?.toLocaleString('en-IN') || '0',
+            balance: folio.balance?.toLocaleString('en-IN') || '0',
+            propertyName: propertyDetails?.name || 'Hotel',
+            propertyEmail: propertyDetails?.email || '',
+            propertyPhone: propertyDetails?.phone || '',
+            propertyAddress: propertyDetails?.address || '',
+            gstin: propertyDetails?.gstin || ''
+        };
+        
+        // Build charges table HTML
+        let chargesTableHtml = '';
+        if (folio.items && folio.items.length > 0) {
+            chargesTableHtml = '<table class="charges-table"><thead><tr><th>Date</th><th>Description</th><th>Department</th><th class="amount">Amount</th></tr></thead><tbody>';
+            folio.items.forEach(item => {
+                const itemAmount = ((item.amount || 0) + (item.tax || 0) - (item.discount || 0)) * (item.quantity || 1);
+                chargesTableHtml += `<tr>
+                    <td>${item.date ? new Date(item.date).toLocaleDateString('en-GB') : ''}</td>
+                    <td>${item.description || ''}</td>
+                    <td>${item.department || 'Other'}</td>
+                    <td class="amount">₹${itemAmount.toLocaleString('en-IN')}</td>
+                </tr>`;
+            });
+            chargesTableHtml += '</tbody></table>';
+        } else {
+            chargesTableHtml = '<p style="color: #6b7280; font-style: italic;">No charges available.</p>';
+        }
+        
+        // Replace variables in email content
+        let emailContent = emailTemplate.content || '';
+        let emailSubject = emailTemplate.subject || `Paymaster Folio Statement - ${paymaster.paymasterCode}`;
+        
+        // Replace all variables
+        Object.keys(replacements).forEach(key => {
+            const regex = new RegExp(`{{${key}}}`, 'g');
+            emailContent = emailContent.replace(regex, replacements[key]);
+            emailSubject = emailSubject.replace(regex, replacements[key]);
+        });
+        
+        // Replace charges table placeholder
+        emailContent = emailContent.replace('{{chargesTable}}', chargesTableHtml);
+        
+        // Send email
+        const emailResult = await emailService.sendEmail(
+            tenant,
+            recipientEmail,
+            emailSubject,
+            emailContent
+        );
+        
+        if (!emailResult.success) {
+            return res.status(500).json({ 
+                message: 'Failed to send email', 
+                error: emailResult.error 
+            });
+        }
+        
+        res.status(200).json({ 
+            message: 'Email sent successfully',
+            email: recipientEmail
+        });
+    } catch (error) {
+        console.error('Error sending paymaster email:', error);
+        res.status(500).json({ message: 'Server error sending email', error: error.message });
+    }
+});
+
 // Delete paymaster room
 router.delete('/:id', async (req, res) => {
     try {

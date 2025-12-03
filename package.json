@@ -8,6 +8,7 @@
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.19.1",
     "nodemailer": "^7.0.10",
+    "pdfkit": "^0.17.2",
     "ws": "^8.18.3"
   },
   "scripts": {

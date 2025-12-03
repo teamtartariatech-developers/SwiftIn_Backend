@@ -30,7 +30,51 @@ async function authenticateSocket(request) {
     throw new Error('INVALID_TOKEN');
   }
 
-  const tenant = await getTenantContext(decoded.propertyCode);
+  // Retry logic for database operations (in case DB is still connecting)
+  let tenant;
+  let retries = 3;
+  let lastError;
+  
+  while (retries > 0) {
+    try {
+      tenant = await getTenantContext(decoded.propertyCode);
+      break; // Success, exit retry loop
+    } catch (error) {
+      lastError = error;
+      retries--;
+      
+      // Only log network/DNS errors if they persist after all retries
+      // Don't spam console with retry attempts for transient issues
+      const isNetworkError = error.message?.includes('ENOTFOUND') || 
+                            error.message?.includes('getaddrinfo') ||
+                            error.message?.includes('MongoServerSelectionError') ||
+                            error.code === 'ENOTFOUND';
+      
+      if (retries > 0) {
+        // Wait a bit before retrying (silently for network errors)
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (!isNetworkError) {
+          console.log(`Retrying tenant context retrieval... (${retries} attempts left)`);
+        }
+      }
+    }
+  }
+  
+  if (!tenant) {
+    // Only log if it's not a network/DNS error (those are usually transient)
+    const isNetworkError = lastError?.message?.includes('ENOTFOUND') || 
+                          lastError?.message?.includes('getaddrinfo') ||
+                          lastError?.message?.includes('MongoServerSelectionError') ||
+                          lastError?.code === 'ENOTFOUND';
+    
+    if (!isNetworkError) {
+      console.error('Failed to get tenant context after retries:', lastError?.message || lastError);
+    }
+    // Don't throw error for network issues - just fail silently for WebSocket
+    // The main app will work fine, WebSocket will just not connect
+    throw new Error('DATABASE_NOT_READY');
+  }
+
   const UserModel = tenant.models.User;
   const user = await UserModel.findById(decoded.userId);
 
@@ -131,7 +175,15 @@ function initWebsockets(server) {
         payload: { userName: user.name },
       }));
     } catch (error) {
-      console.error('WS Auth Error:', error);
+      // Only log non-network errors (network errors are usually transient DNS issues)
+      const isNetworkError = error.message?.includes('ENOTFOUND') || 
+                            error.message?.includes('getaddrinfo') ||
+                            error.message?.includes('MongoServerSelectionError') ||
+                            error.message?.includes('DATABASE_NOT_READY');
+      
+      if (!isNetworkError) {
+        console.error('WS Auth Error:', error.message || error);
+      }
       socket.send(JSON.stringify({ type: 'housekeeping:error', message: 'Authentication failed' }));
       return socket.close();
     }
@@ -171,7 +223,15 @@ function initWebsockets(server) {
         payload: { userName: user.name }
       }));
     } catch (error) {
-      console.error('StayView WS Auth Error:', error);
+      // Only log non-network errors (network errors are usually transient DNS issues)
+      const isNetworkError = error.message?.includes('ENOTFOUND') || 
+                            error.message?.includes('getaddrinfo') ||
+                            error.message?.includes('MongoServerSelectionError') ||
+                            error.message?.includes('DATABASE_NOT_READY');
+      
+      if (!isNetworkError) {
+        console.error('StayView WS Auth Error:', error.message || error);
+      }
       socket.send(JSON.stringify({ type: 'stayview:error', message: 'Authentication failed' }));
       return socket.close();
     }

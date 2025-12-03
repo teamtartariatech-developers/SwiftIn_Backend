@@ -157,6 +157,7 @@ const sendEmail = async (tenant, to, subject, htmlContent, options = {}) => {
       subject,
       html: htmlContent,
       text: typeof htmlContent === 'string' ? htmlContent.replace(/<[^>]*>/g, '') : '',
+      attachments: options.attachments || [],
     };
 
     const info = await transporter.sendMail(mailOptions);

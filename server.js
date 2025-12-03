@@ -40,7 +40,6 @@ app.use((req, res, next) => {
 });
 
 dotenv.config();
-connectDB();
 
 app.get('/', (req, res) => {
     res.send('This is intelligent Hospitality Management System');
@@ -71,9 +70,17 @@ app.use('/api/group-reservation', groupReservation);
 
 
 const server = http.createServer(app);
-initWebsockets(server);
 
-const port = process.env.Port || 3000;
-server.listen(port, () => { 
-    console.log(`Server is listening on port ${port}`);
-} );
+// Connect to MongoDB first, then initialize WebSockets
+connectDB().then(() => {
+    console.log('MongoDB connected, initializing WebSockets...');
+    initWebsockets(server);
+    
+    const port = process.env.Port || 3000;
+    server.listen(port, () => { 
+        console.log(`Server is listening on port ${port}`);
+    });
+}).catch((error) => {
+    console.error('Failed to connect to MongoDB:', error);
+    process.exit(1);
+});

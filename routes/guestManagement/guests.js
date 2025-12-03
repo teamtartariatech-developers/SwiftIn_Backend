@@ -259,10 +259,14 @@ router.post('/create-or-update', async (req, res) => {
             }
         }
         
-        // Check if guest already exists by email or phone
+        // Check if guest already exists by email, phone, or Aadhaar ID
         const identifierQuery = [];
         if (guestEmail) identifierQuery.push({ guestEmail });
         if (guestNumber) identifierQuery.push({ guestNumber });
+        // Only include Aadhaar ID in query if it's provided (not empty)
+        if (aadhaarNumber && aadhaarNumber.trim()) {
+            identifierQuery.push({ aadhaarNumber: aadhaarNumber.trim() });
+        }
 
         let existingGuest = null;
         if (identifierQuery.length > 0) {
@@ -270,6 +274,22 @@ router.post('/create-or-update', async (req, res) => {
                 property: propertyId,
                 $or: identifierQuery
             });
+            
+            // If guest found by email/phone/Aadhaar, verify name matches
+            // If name is different, treat as new guest (don't update existing)
+            // Only check name if both existing and new guest have names
+            if (existingGuest && guestName && existingGuest.guestName) {
+                const existingName = existingGuest.guestName.toLowerCase().trim();
+                const newName = guestName.toLowerCase().trim();
+                
+                if (existingName !== newName) {
+                    console.log(`Found guest with matching identifier but different name. Existing: "${existingGuest.guestName}", New: "${guestName}". Creating new guest profile.`);
+                    existingGuest = null; // Treat as new guest
+                }
+            }
+            // If existing guest has no name but new guest has name, update the name
+            // If new guest has no name but existing has name, keep existing name
+            // Both cases are handled in the update logic below
         }
 
         const resolvedCheckIn = checkInDate || reservation?.checkInDate || null;
@@ -290,27 +310,69 @@ router.post('/create-or-update', async (req, res) => {
         if (existingGuest) {
             console.log('Existing guest found:', existingGuest._id);
             
-            // Create new stay record
+            // Check if a record for this reservation already exists
+            let existingRecordIndex = -1;
+            if (reservationId && existingGuest.records && Array.isArray(existingGuest.records)) {
+                // Try to find record by matching reservation ID (stored in guest profile)
+                // Since records don't store reservationId directly, we'll match by date range
+                // If dates are being updated, we should update the existing record instead of creating a new one
+                const newStayRecord = buildStayRecord();
+                const checkInDate = new Date(newStayRecord.checkInDate);
+                const checkOutDate = new Date(newStayRecord.checkOutDate);
+                
+                // Find record with matching or overlapping dates (within 1 day tolerance)
+                existingRecordIndex = existingGuest.records.findIndex((record, idx) => {
+                    const recordCheckIn = new Date(record.checkInDate);
+                    const recordCheckOut = new Date(record.checkOutDate);
+                    // Check if dates are close (within 1 day) - likely the same reservation being updated
+                    const checkInDiff = Math.abs(checkInDate.getTime() - recordCheckIn.getTime()) / (1000 * 60 * 60 * 24);
+                    const checkOutDiff = Math.abs(checkOutDate.getTime() - recordCheckOut.getTime()) / (1000 * 60 * 60 * 24);
+                    return checkInDiff <= 1 && checkOutDiff <= 1;
+                });
+            }
+            
             const newStayRecord = buildStayRecord();
             
-            // Calculate average stay duration
-            const allRecords = [...existingGuest.records, newStayRecord];
-            const totalNights = allRecords.reduce((sum, record) => {
-                const checkIn = new Date(record.checkInDate);
-                const checkOut = new Date(record.checkOutDate);
-                const nights = Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24));
-                return sum + nights;
-            }, 0);
-            const averageStay = totalNights / allRecords.length;
-
-            // Update existing guest
-            const updatedGuest = await guestProfiles.findOneAndUpdate(
-                { _id: existingGuest._id, property: propertyId },
-                {
+            let updateQuery;
+            if (existingRecordIndex >= 0) {
+                // Update existing record instead of creating a new one
+                console.log(`Updating existing stay record at index ${existingRecordIndex} instead of creating duplicate`);
+                const recordsPath = `records.${existingRecordIndex}`;
+                updateQuery = {
+                    $set: {
+                        [`${recordsPath}.checkInDate`]: newStayRecord.checkInDate,
+                        [`${recordsPath}.checkOutDate`]: newStayRecord.checkOutDate,
+                        [`${recordsPath}.amount`]: newStayRecord.amount,
+                        totalSpend: existingGuest.totalSpend - (existingGuest.records[existingRecordIndex].amount || 0) + (totalSpend || 0),
+                        ...(guestName && { guestName }), // Update name if provided
+                        ...(guestEmail && { guestEmail }), // Update email if provided
+                        ...(guestNumber && { guestNumber }), // Update phone if provided
+                        ...(reservation ? { reservationId: reservation._id } : {}),
+                        ...(guestType && { guestType }),
+                        ...(aadhaarNumber && { aadhaarNumber }),
+                        ...(typeof adultCount === 'number' ? { adultCount } : {}),
+                        ...(typeof childCount === 'number' ? { childCount } : {})
+                    }
+                };
+            } else {
+                // Create new stay record (first time for this reservation)
+                const allRecords = [...existingGuest.records, newStayRecord];
+                const totalNights = allRecords.reduce((sum, record) => {
+                    const checkIn = new Date(record.checkInDate);
+                    const checkOut = new Date(record.checkOutDate);
+                    const nights = Math.ceil((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24));
+                    return sum + nights;
+                }, 0);
+                const averageStay = totalNights / allRecords.length;
+                
+                updateQuery = {
                     $set: {
                         totalVisits: existingGuest.totalVisits + 1,
                         totalSpend: existingGuest.totalSpend + (totalSpend || 0),
                         AverageStay: Math.round(averageStay * 100) / 100,
+                        ...(guestName && { guestName }), // Update name if provided
+                        ...(guestEmail && { guestEmail }), // Update email if provided
+                        ...(guestNumber && { guestNumber }), // Update phone if provided
                         ...(reservation ? { reservationId: reservation._id } : {}),
                         ...(guestType && { guestType }),
                         ...(aadhaarNumber && { aadhaarNumber }),
@@ -318,7 +380,13 @@ router.post('/create-or-update', async (req, res) => {
                         ...(typeof childCount === 'number' ? { childCount } : {})
                     },
                     $push: { records: newStayRecord }
-                },
+                };
+            }
+
+            // Update existing guest
+            const updatedGuest = await guestProfiles.findOneAndUpdate(
+                { _id: existingGuest._id, property: propertyId },
+                updateQuery,
                 { new: true, runValidators: true }
             );
             

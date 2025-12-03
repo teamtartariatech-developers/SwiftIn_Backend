@@ -43,6 +43,7 @@ function loadBaseSchema(modelName) {
         HousekeepingMessage: require('../db/housekeeping/message').schema,
         NightAudit: require('../db/nightAudit').schema,
         CityLedgerAccount: require('../db/cityLedger').schema,
+        ScheduledEmail: require('../db/scheduledEmail').schema,
         TravelAgent: require('../db/travelAgent').schema,
         PaymasterRoom: require('../db/paymaster').schema,
         GroupReservation: require('../db/groupReservation').schema,

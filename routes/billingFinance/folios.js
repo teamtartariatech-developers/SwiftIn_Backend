@@ -858,5 +858,425 @@ router.get('/bills/:id', async (req, res) => {
     }
 });
 
+// Send folio email
+router.post('/:id/send-email', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const tenant = req.tenant;
+        
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid folio ID format' });
+        }
+        
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const EmailTemplate = getModel(req, 'EmailTemplate');
+        const PropertyDetails = getModel(req, 'PropertyDetails');
+        const emailService = require('../../services/emailService');
+        
+        // Get folio
+        const folio = await GuestFolio.findOne({
+            _id: id,
+            property: propertyId
+        }).populate('reservationId').populate('paymasterId');
+        
+        if (!folio) {
+            return res.status(404).json({ message: 'Folio not found' });
+        }
+        
+        // Determine template name based on folio type
+        const isPaymaster = !!folio.paymasterId;
+        const templateName = isPaymaster ? 'paymasterFolioInvoice' : 'guestFolioInvoice';
+        
+        // Get email template
+        const emailTemplate = await EmailTemplate.findOne({
+            template_name: templateName,
+            property: propertyId
+        });
+        
+        if (!emailTemplate) {
+            return res.status(404).json({ 
+                message: `Email template "${templateName}" not found. Please add it to the database.` 
+            });
+        }
+        
+        // Get recipient email
+        let recipientEmail = '';
+        if (isPaymaster) {
+            // For paymaster, we need to check if there's an email field
+            // Since paymaster doesn't have email, we'll skip sending if no email is configured
+            recipientEmail = folio.guestEmail || ''; // Fallback to guest email if available
+        } else {
+            recipientEmail = folio.guestEmail || '';
+        }
+        
+        if (!recipientEmail) {
+            return res.status(400).json({ 
+                message: 'No email address found for this folio. Please add an email address.' 
+            });
+        }
+        
+        // Get property details
+        const propertyDetails = await PropertyDetails.findOne({ property: propertyId });
+        
+        // Prepare replacements
+        const replacements = {
+            folioId: folio.folioId,
+            guestName: folio.guestName,
+            roomNumber: folio.roomNumber || '',
+            roomNumbers: folio.roomNumbers?.join(', ') || '',
+            checkIn: folio.checkIn ? new Date(folio.checkIn).toLocaleDateString('en-GB') : '',
+            checkOut: folio.checkOut ? new Date(folio.checkOut).toLocaleDateString('en-GB') : '',
+            totalCharges: folio.totalCharges?.toLocaleString('en-IN') || '0',
+            totalPayments: folio.totalPayments?.toLocaleString('en-IN') || '0',
+            balance: folio.balance?.toLocaleString('en-IN') || '0',
+            propertyName: propertyDetails?.name || 'Hotel',
+            propertyEmail: propertyDetails?.email || '',
+            propertyPhone: propertyDetails?.phone || '',
+            propertyAddress: propertyDetails?.address || '',
+            gstin: propertyDetails?.gstin || ''
+        };
+        
+        // Add paymaster-specific fields if applicable
+        if (isPaymaster && folio.paymasterId) {
+            replacements.paymasterCode = folio.paymasterId.paymasterCode || '';
+            replacements.paymasterName = folio.paymasterId.name || folio.guestName;
+            replacements.accountType = folio.paymasterId.accountType || '';
+        }
+        
+        // Build charges table HTML
+        let chargesTableHtml = '';
+        if (folio.items && folio.items.length > 0) {
+            chargesTableHtml = '<table class="charges-table"><thead><tr><th>Date</th><th>Description</th><th>Department</th><th class="amount">Amount</th></tr></thead><tbody>';
+            folio.items.forEach(item => {
+                const itemAmount = ((item.amount || 0) + (item.tax || 0) - (item.discount || 0)) * (item.quantity || 1);
+                chargesTableHtml += `<tr>
+                    <td>${item.date ? new Date(item.date).toLocaleDateString('en-GB') : ''}</td>
+                    <td>${item.description || ''}</td>
+                    <td>${item.department || 'Other'}</td>
+                    <td class="amount">₹${itemAmount.toLocaleString('en-IN')}</td>
+                </tr>`;
+            });
+            chargesTableHtml += '</tbody></table>';
+        } else {
+            chargesTableHtml = '<p style="color: #6b7280; font-style: italic;">No charges available.</p>';
+        }
+        
+        // Replace variables in email content
+        let emailContent = emailTemplate.content || '';
+        let emailSubject = emailTemplate.subject || `Folio Statement - ${folio.folioId}`;
+        
+        // Replace all variables
+        Object.keys(replacements).forEach(key => {
+            const regex = new RegExp(`{{${key}}}`, 'g');
+            emailContent = emailContent.replace(regex, replacements[key]);
+            emailSubject = emailSubject.replace(regex, replacements[key]);
+        });
+        
+        // Replace charges table placeholder
+        emailContent = emailContent.replace('{{chargesTable}}', chargesTableHtml);
+        
+        // Send email
+        const emailResult = await emailService.sendEmail(
+            tenant,
+            recipientEmail,
+            emailSubject,
+            emailContent
+        );
+        
+        if (!emailResult.success) {
+            return res.status(500).json({ 
+                message: 'Failed to send email', 
+                error: emailResult.error 
+            });
+        }
+        
+        res.status(200).json({ 
+            message: 'Email sent successfully',
+            email: recipientEmail
+        });
+    } catch (error) {
+        console.error('Error sending folio email:', error);
+        res.status(500).json({ message: 'Server error sending email', error: error.message });
+    }
+});
+
+// Generate PDF for bill and send via email
+router.post('/bills/:id/generate-pdf', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { sendViaEmail, sendViaWhatsApp } = req.body;
+        const propertyId = getPropertyId(req);
+        const tenant = req.tenant;
+        
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid bill ID format' });
+        }
+        
+        const Bill = getModel(req, 'Bill');
+        const PropertyDetails = getModel(req, 'PropertyDetails');
+        const emailService = require('../../services/emailService');
+        const PDFDocument = require('pdfkit');
+        const fs = require('fs');
+        const path = require('path');
+        
+        // Get bill
+        const bill = await Bill.findOne({
+            _id: id,
+            property: propertyId
+        });
+        
+        if (!bill) {
+            return res.status(404).json({ message: 'Bill not found' });
+        }
+        
+        // Get property details
+        const propertyDetails = await PropertyDetails.findOne({ property: propertyId });
+        
+        // Generate PDF
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        const pdfPath = path.join(__dirname, '../../temp', `invoice_${bill.billId}_${Date.now()}.pdf`);
+        
+        // Ensure temp directory exists
+        const tempDir = path.dirname(pdfPath);
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+        }
+        
+        const stream = fs.createWriteStream(pdfPath);
+        doc.pipe(stream);
+        
+        // Colors
+        const primaryColor = '#0f5f9c';
+        const textColor = '#1f2a37';
+        const grayColor = '#6b7280';
+        
+        // Header
+        doc.rect(0, 0, doc.page.width, 80).fill(primaryColor);
+        doc.fillColor('white')
+           .fontSize(24)
+           .font('Helvetica-Bold')
+           .text(propertyDetails?.propertyName || 'Hotel', 50, 30);
+        
+        doc.fontSize(10)
+           .font('Helvetica')
+           .text('Invoice Statement', 50, 60);
+        
+        let yPos = 100;
+        
+        // Invoice Info
+        doc.fillColor(textColor)
+           .fontSize(10)
+           .font('Helvetica-Bold')
+           .text('Invoice Information', 50, yPos);
+        
+        yPos += 20;
+        doc.font('Helvetica')
+           .fontSize(9)
+           .fillColor(grayColor)
+           .text('Bill ID:', 50, yPos)
+           .text('Folio ID:', 50, yPos + 15)
+           .text('Checkout Date:', 50, yPos + 30)
+           .text('Archived Date:', 50, yPos + 45);
+        
+        doc.fillColor(textColor)
+           .text(bill.billId, 120, yPos)
+           .text(bill.folioId, 120, yPos + 15)
+           .text(new Date(bill.checkoutDate).toLocaleDateString('en-GB'), 120, yPos + 30)
+           .text(new Date(bill.archivedAt).toLocaleDateString('en-GB'), 120, yPos + 45);
+        
+        doc.text('Guest Name:', 300, yPos)
+           .text('Reservation ID:', 300, yPos + 15)
+           .text('Room Number:', 300, yPos + 30)
+           .text('Stay Period:', 300, yPos + 45);
+        
+        doc.text(bill.guestName, 400, yPos)
+           .text(String(bill.reservationId || '-'), 400, yPos + 15)
+           .text(bill.roomNumber || '-', 400, yPos + 30)
+           .text(
+               `${new Date(bill.checkIn).toLocaleDateString('en-GB')} - ${new Date(bill.checkOut).toLocaleDateString('en-GB')}`,
+               400,
+               yPos + 45
+           );
+        
+        yPos += 70;
+        
+        // Charges Table
+        doc.font('Helvetica-Bold')
+           .fontSize(10)
+           .fillColor(textColor)
+           .text('Charges', 50, yPos);
+        
+        yPos += 20;
+        doc.font('Helvetica-Bold')
+           .fontSize(8)
+           .fillColor('white')
+           .rect(50, yPos, 500, 20)
+           .fill(primaryColor)
+           .text('Date', 55, yPos + 6)
+           .text('Description', 120, yPos + 6)
+           .text('Department', 350, yPos + 6)
+           .text('Amount', 450, yPos + 6, { align: 'right' });
+        
+        yPos += 25;
+        doc.fillColor(textColor)
+           .font('Helvetica')
+           .fontSize(8);
+        
+        if (bill.items && bill.items.length > 0) {
+            bill.items.forEach(item => {
+                const itemAmount = ((item.amount || 0) + (item.tax || 0) - (item.discount || 0)) * (item.quantity || 1);
+                doc.text(new Date(item.date).toLocaleDateString('en-GB'), 55, yPos)
+                   .text(item.description || '-', 120, yPos, { width: 220 })
+                   .text(item.department || 'Other', 350, yPos)
+                   .text(`₹${itemAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 450, yPos, { align: 'right' });
+                yPos += 15;
+            });
+        } else {
+            doc.text('No charges', 55, yPos);
+            yPos += 15;
+        }
+        
+        yPos += 10;
+        
+        // Payments Table
+        doc.font('Helvetica-Bold')
+           .fontSize(10)
+           .fillColor(textColor)
+           .text('Payments', 50, yPos);
+        
+        yPos += 20;
+        doc.font('Helvetica-Bold')
+           .fontSize(8)
+           .fillColor('white')
+           .rect(50, yPos, 500, 20)
+           .fill(primaryColor)
+           .text('Date', 55, yPos + 6)
+           .text('Method', 120, yPos + 6)
+           .text('Transaction ID', 250, yPos + 6)
+           .text('Amount', 450, yPos + 6, { align: 'right' });
+        
+        yPos += 25;
+        doc.fillColor(textColor)
+           .font('Helvetica')
+           .fontSize(8);
+        
+        if (bill.payments && bill.payments.length > 0) {
+            bill.payments.forEach(payment => {
+                doc.text(new Date(payment.date).toLocaleDateString('en-GB'), 55, yPos)
+                   .text(payment.method, 120, yPos)
+                   .text(payment.transactionId || '-', 250, yPos, { width: 180 })
+                   .text(`₹${payment.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 450, yPos, { align: 'right' });
+                yPos += 15;
+            });
+        } else {
+            doc.text('No payments', 55, yPos);
+            yPos += 15;
+        }
+        
+        yPos += 20;
+        
+        // Summary
+        doc.rect(50, yPos, 500, 60)
+           .stroke(primaryColor)
+           .lineWidth(1);
+        
+        doc.font('Helvetica')
+           .fontSize(9)
+           .fillColor(grayColor)
+           .text('Total Charges:', 55, yPos + 10)
+           .text('Total Payments:', 55, yPos + 25)
+           .text('Final Balance:', 55, yPos + 45);
+        
+        doc.font('Helvetica-Bold')
+           .fillColor(textColor)
+           .text(`₹${bill.totalCharges.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 500, yPos + 10, { align: 'right' })
+           .text(`₹${bill.totalPayments.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 500, yPos + 25, { align: 'right' });
+        
+        const balanceColor = bill.finalBalance === 0 ? '#22c55e' : '#ef4444';
+        doc.fillColor(balanceColor)
+           .fontSize(12)
+           .text(`₹${bill.finalBalance.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 500, yPos + 45, { align: 'right' });
+        
+        // Footer
+        const footerY = doc.page.height - 50;
+        doc.font('Helvetica')
+           .fontSize(8)
+           .fillColor(grayColor)
+           .text(propertyDetails?.address || '', 50, footerY)
+           .text(`Phone: ${propertyDetails?.phone || ''} | Email: ${propertyDetails?.email || ''}`, 50, footerY + 10);
+        
+        if (propertyDetails?.gstin) {
+            doc.text(`GSTIN: ${propertyDetails.gstin}`, 50, footerY + 20);
+        }
+        
+        doc.end();
+        
+        // Wait for PDF to be written
+        await new Promise((resolve, reject) => {
+            stream.on('finish', resolve);
+            stream.on('error', reject);
+        });
+        
+        const results = {
+            pdfPath,
+            emailSent: false,
+            whatsappMessage: null
+        };
+        
+        // Send via email if requested
+        if (sendViaEmail && bill.guestEmail) {
+            const emailSubject = `Invoice ${bill.billId} - ${propertyDetails?.propertyName || 'Hotel'}`;
+            const emailHtml = `
+                <div style="font-family: Arial, sans-serif; padding: 20px;">
+                    <h2 style="color: #0f5f9c;">Invoice ${bill.billId}</h2>
+                    <p>Dear ${bill.guestName},</p>
+                    <p>Please find attached your invoice statement.</p>
+                    <p><strong>Total Amount:</strong> ₹${bill.totalCharges.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p><strong>Final Balance:</strong> ₹${bill.finalBalance.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                    <p>Thank you for your business!</p>
+                    <p>Best regards,<br>${propertyDetails?.propertyName || 'Hotel'} Team</p>
+                </div>
+            `;
+            
+            const emailResult = await emailService.sendEmail(
+                tenant,
+                bill.guestEmail,
+                emailSubject,
+                emailHtml,
+                {
+                    attachments: [{
+                        filename: `Invoice_${bill.billId}.pdf`,
+                        path: pdfPath
+                    }]
+                }
+            );
+            
+            results.emailSent = emailResult.success;
+        }
+        
+        // Prepare WhatsApp message
+        if (sendViaWhatsApp && bill.guestPhone) {
+            const message = `Hello ${bill.guestName},\n\nYour invoice ${bill.billId} has been sent to your email${bill.guestEmail ? ` (${bill.guestEmail})` : ''}.\n\nTotal Amount: ₹${bill.totalCharges.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\nFinal Balance: ₹${bill.finalBalance.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n\nPlease check your email for the PDF invoice.\n\nThank you!`;
+            results.whatsappMessage = message;
+        }
+        
+        // Clean up PDF file after a delay (or keep it for download)
+        setTimeout(() => {
+            if (fs.existsSync(pdfPath)) {
+                fs.unlinkSync(pdfPath);
+            }
+        }, 60000); // Delete after 1 minute
+        
+        res.status(200).json({
+            message: 'PDF generated successfully',
+            ...results
+        });
+    } catch (error) {
+        console.error('Error generating PDF:', error);
+        res.status(500).json({ message: 'Server error generating PDF', error: error.message });
+    }
+});
+
 module.exports = router;
 

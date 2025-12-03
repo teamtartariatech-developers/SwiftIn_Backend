@@ -8,6 +8,10 @@ const emailTemplateSchema = new mongoose.Schema(
             required: true,
             trim: true,
         },
+        subject: {
+            type: String,
+            trim: true,
+        },
         content: {
             type: String,
             required: true,

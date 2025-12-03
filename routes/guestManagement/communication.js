@@ -667,17 +667,55 @@ router.post('/campaigns/:id/send', async (req, res) => {
         });
         
         // Allow re-sending campaigns (useful for testing or re-sending to same audience)
-        // If you want to prevent re-sending, uncomment the check below:
-        // if (campaign.status === 'Sent') {
-        //     console.log('ERROR: Campaign already sent');
-        //     return res.status(400).json({ 
-        //         message: "Campaign has already been sent. Please create a new campaign to send again.",
-        //         code: 'CAMPAIGN_ALREADY_SENT'
-        //     });
-        // }
-        
         if (campaign.status === 'Sent') {
             console.log('WARNING: Re-sending a campaign that was already sent');
+        }
+        
+        // Set status to "Sending" immediately and return response
+        campaign.status = 'Sending';
+        await campaign.save();
+        
+        console.log('Campaign status set to "Sending", starting background send process...');
+        
+        // Return immediately - sending happens in background
+        res.status(202).json({ 
+            message: "Campaign is being sent in the background",
+            campaign: {
+                _id: campaign._id,
+                name: campaign.name,
+                status: campaign.status
+            }
+        });
+        
+        // Continue sending in background (fire and forget)
+        // Don't await this - let it run asynchronously
+        sendCampaignInBackground(campaign._id.toString(), propertyId, req.tenant).catch((error) => {
+            console.error('Background send error:', error);
+            // Update campaign status to Draft on error so user can retry
+            Campaign.findByIdAndUpdate(campaign._id, { status: 'Draft' }).catch(() => {});
+        });
+    } catch (error) {
+        console.error('=== CAMPAIGN SEND REQUEST ERROR ===');
+        console.error('Error type:', error.constructor.name);
+        console.error('Error message:', error.message);
+        res.status(500).json({ message: "Server error initiating campaign send.", error: error.message });
+    }
+});
+
+// Background function to send campaign emails
+async function sendCampaignInBackground(campaignId, propertyId, tenant) {
+    try {
+        console.log('=== BACKGROUND SEND START ===');
+        console.log('Campaign ID:', campaignId);
+        
+        const Campaign = tenant.models.Campaign;
+        const GuestProfiles = tenant.models.GuestProfiles;
+        
+        // Re-fetch campaign to get fresh data
+        const campaign = await Campaign.findOne({ _id: campaignId, property: propertyId });
+        if (!campaign) {
+            console.error('Campaign not found in background process');
+            return;
         }
         
         // Calculate recipients based on audience
@@ -787,7 +825,7 @@ router.post('/campaigns/:id/send', async (req, res) => {
                         totalAmount: reservation.totalAmount || g.totalSpend || 0,
                         guestType: g.guestType || 'regular',
                         totalVisits: g.totalVisits || 0,
-                        propertyName: req.tenant?.property?.name || 'Our Property'
+                        propertyName: tenant?.property?.name || 'Our Property'
                     }
                 };
             });
@@ -855,7 +893,7 @@ router.post('/campaigns/:id/send', async (req, res) => {
                                 totalAmount: reservation.totalAmount || guest.totalSpend || 0,
                                 guestType: guest.guestType || 'regular',
                                 totalVisits: guest.totalVisits || 0,
-                                propertyName: req.tenant?.property?.name || 'Our Property'
+                                propertyName: tenant?.property?.name || 'Our Property'
                             };
                         }
                     } catch (err) {
@@ -877,21 +915,13 @@ router.post('/campaigns/:id/send', async (req, res) => {
         
         if (recipients.length === 0) {
             console.error('ERROR: No recipients found', {
-                campaignId: id,
+                campaignId: campaignId,
                 audienceType: campaign.audience.type,
                 audience: campaign.audience
             });
-            return res.status(400).json({ 
-                message: "No recipients found for this campaign. Please ensure your audience selection includes guests with valid email addresses.",
-                details: {
-                    audienceType: campaign.audience.type,
-                    hint: campaign.audience.type === 'all' 
-                        ? 'No guests in the system have email addresses.'
-                        : campaign.audience.type === 'segment'
-                        ? 'No guests match your segment criteria or they don\'t have email addresses.'
-                        : 'No valid email addresses in your custom recipient list.'
-                }
-            });
+            // Update status to Draft on error
+            await Campaign.findByIdAndUpdate(campaignId, { status: 'Draft' });
+            return;
         }
         
         // Validate campaign has required fields
@@ -901,16 +931,14 @@ router.post('/campaigns/:id/send', async (req, res) => {
         
         if (!campaign.subject || !campaign.subject.trim()) {
             console.log('ERROR: Campaign subject is missing');
-            return res.status(400).json({ 
-                message: "Campaign subject is required. Please select a template that includes a subject line." 
-            });
+            await Campaign.findByIdAndUpdate(campaignId, { status: 'Draft' });
+            return;
         }
         
         if (!campaign.content || !campaign.content.trim()) {
             console.log('ERROR: Campaign content is missing');
-            return res.status(400).json({ 
-                message: "Campaign content is required. Please select a template that includes content." 
-            });
+            await Campaign.findByIdAndUpdate(campaignId, { status: 'Draft' });
+            return;
         }
         
         // Function to replace variables in content with actual guest data
@@ -939,17 +967,16 @@ router.post('/campaigns/:id/send', async (req, res) => {
         const subjectTemplate = campaign.subject.trim();
         const contentTemplate = campaign.content || '';
         
-        // Use environment variable for base URL if available, otherwise use request host
+        // Use environment variable for base URL if available
         // This ensures tracking URLs work correctly in production
-        // Check for SERVER_URL, API_BASE_URL, or construct from request
         let baseUrl = process.env.SERVER_URL || process.env.API_BASE_URL;
         if (baseUrl) {
             // Remove /api suffix if present
             baseUrl = baseUrl.replace(/\/api$/, '');
         } else {
-            // Fallback to request host, but prefer https in production
-            const host = req.get('host');
-            const protocol = process.env.NODE_ENV === 'production' ? 'https' : req.protocol;
+            // Fallback - use https in production, http in development
+            const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+            const host = process.env.HOST || 'localhost:3000';
             baseUrl = `${protocol}://${host}`;
         }
         
@@ -979,8 +1006,7 @@ router.post('/campaigns/:id/send', async (req, res) => {
                     const personalizedContent = replaceVariables(contentTemplate, recipient.guestData);
                     
                     // Add tracking pixel with recipient email for per-recipient tracking
-                    const propertyCode = req.tenant.property.code;
-                    const campaignId = campaign._id.toString();
+                    const propertyCode = tenant.property.code;
                     const trackingUrl = `${baseUrl}/api/guestmanagement/communication/open?code=${encodeURIComponent(
                         propertyCode
                     )}&cid=${campaignId}&email=${encodeURIComponent(recipient.email)}`;
@@ -991,7 +1017,7 @@ router.post('/campaigns/:id/send', async (req, res) => {
                     
                     // Send individual email
                     const emailResult = await emailService.sendEmail(
-                        req.tenant,
+                        tenant,
                         recipient.email,
                         personalizedSubject,
                         finalHtmlContent
@@ -1031,10 +1057,8 @@ router.post('/campaigns/:id/send', async (req, res) => {
             });
             if (emailError.code === 'EMAIL_INTEGRATION_NOT_CONFIGURED') {
                 console.log('ERROR: Email integration not configured');
-                return res.status(400).json({
-                    message: 'Email integration is not configured. Please connect an SMTP provider in Settings > Email Integration.',
-                    code: 'EMAIL_INTEGRATION_NOT_CONFIGURED'
-                });
+                await Campaign.findByIdAndUpdate(campaignId, { status: 'Draft' });
+                return;
             }
             throw emailError; // Re-throw other errors
         }
@@ -1047,8 +1071,8 @@ router.post('/campaigns/:id/send', async (req, res) => {
         campaign.bounced = emailResults.failed;
 
         // Bump template usage metrics if this campaign was created from a template
-        if (campaign.templateId && req.tenant?.models?.MessageTemplate) {
-            const MessageTemplate = req.tenant.models.MessageTemplate;
+        if (campaign.templateId && tenant?.models?.MessageTemplate) {
+            const MessageTemplate = tenant.models.MessageTemplate;
             await MessageTemplate.findByIdAndUpdate(campaign.templateId, {
                 $inc: { usageCount: 1 },
                 $set: { lastUsedAt: new Date() },
@@ -1057,34 +1081,29 @@ router.post('/campaigns/:id/send', async (req, res) => {
 
         await campaign.save();
         
-        res.status(200).json({ 
-            message: "Campaign sent successfully", 
-            campaign,
-            results: {
-                totalRecipients: recipients.length,
-                sent: emailResults.sent,
-                failed: emailResults.failed,
-                errors: emailResults.errors
-            }
+        console.log('=== BACKGROUND SEND COMPLETE ===');
+        console.log('Campaign status updated to "Sent"');
+        console.log('Results:', {
+            totalRecipients: recipients.length,
+            sent: emailResults.sent,
+            failed: emailResults.failed
         });
     } catch (error) {
-        console.error('=== CAMPAIGN SEND ERROR ===');
+        console.error('=== BACKGROUND SEND ERROR ===');
         console.error('Error type:', error.constructor.name);
         console.error('Error message:', error.message);
-        console.error('Error code:', error.code);
         console.error('Error stack:', error.stack);
-        console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
         
-        if (error.code === 'EMAIL_INTEGRATION_NOT_CONFIGURED') {
-            return res.status(400).json({
-                message: 'Email integration is not configured. Please connect an SMTP provider in Settings.',
-            });
+        // Update campaign status to Draft on error so user can retry
+        try {
+            await Campaign.findByIdAndUpdate(campaignId, { status: 'Draft' });
+        } catch (updateError) {
+            console.error('Failed to update campaign status on error:', updateError);
         }
-        res.status(500).json({ message: "Server error sending campaign.", error: error.message });
-    } finally {
-        console.log('=== CAMPAIGN SEND REQUEST END ===');
+        
+        throw error; // Re-throw for caller to handle
     }
-});
+}
 
 // Estimate recipients for a potential campaign audience (no email sending)
 router.post('/campaigns/estimate', async (req, res) => {
