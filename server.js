@@ -17,6 +17,7 @@ const folios = require('./routes/billingFinance/folios');
 const auth = require('./routes/auth/auth');
 const reports = require('./routes/reports/reports');
 const mailer = require('./routes/mailer');
+const independentMailer = require('./independent/mailer');
 const housekeeping = require('./routes/housekeeping');
 const nightAudit = require('./routes/nightAudit/nightAudit');
 const cityLedger = require('./routes/cityLedger/cityLedger');
@@ -58,7 +59,8 @@ app.use('/api/settings', settings);
 app.use('/api/billingfinance/folios', folios);
 app.use('/api/auth', auth);
 app.use('/api/reports', reports);
-app.use('/api/mailer', mailer);
+app.use('/api/mailer', mailer); // Original mailer (tenant-managed)
+app.use('/api/mailer-independent', independentMailer); // Independent mailer (no tenant management)
 app.use('/api/housekeeping', housekeeping);
 app.use('/api/reports/night-audit', nightAudit);
 app.use('/api/city-ledger', cityLedger);
