@@ -171,6 +171,7 @@ router.post('/', async (req, res) => {
         }
         
         const group = new GroupReservation({
+            groupCode: groupCode,
             groupName: validation.validated.groupName,
             contactPerson: validation.validated.contactPerson,
             contactEmail: validation.validated.contactEmail,
@@ -189,6 +190,48 @@ router.post('/', async (req, res) => {
         
         group.calculateTotals();
         await group.save();
+        
+        // Block inventory for group reservation dates
+        const InventoryBlock = getModel(req, 'InventoryBlock');
+        const dateObjects = [];
+        const checkIn = new Date(dateValidation.checkIn);
+        const checkOut = new Date(dateValidation.checkOut);
+        
+        // Generate all dates between check-in and check-out (excluding check-out day)
+        for (let d = new Date(checkIn); d < checkOut; d.setDate(d.getDate() + 1)) {
+            dateObjects.push(new Date(d));
+        }
+        
+        // Create inventory blocks for each room block
+        const inventoryBlockOps = [];
+        for (const roomBlock of validation.validated.roomBlocks) {
+            for (const dateObj of dateObjects) {
+                inventoryBlockOps.push({
+                    updateOne: {
+                        filter: { 
+                            roomType: roomBlock.roomType, 
+                            date: dateObj, 
+                            property: propertyId 
+                        },
+                        update: {
+                            $set: {
+                                blockedInventory: roomBlock.numberOfRooms,
+                                blockedRooms: [],
+                                blockType: 'out-of-order',
+                                reason: `Group reservation: ${group.groupName} (${groupCode})`,
+                                createdBy: req.tenant.user?._id?.toString() || 'admin',
+                                property: propertyId
+                            }
+                        },
+                        upsert: true
+                    }
+                });
+            }
+        }
+        
+        if (inventoryBlockOps.length > 0) {
+            await InventoryBlock.bulkWrite(inventoryBlockOps);
+        }
         
         res.status(201).json(group);
     } catch (error) {

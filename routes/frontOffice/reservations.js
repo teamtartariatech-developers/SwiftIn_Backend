@@ -1313,7 +1313,7 @@ router.post('/:id/notes', async (req, res) => {
         // Add note
         const newNote = {
             content: content.trim(),
-            createdBy: req.user.userId,
+            createdBy: req.tenant.user._id,
             createdAt: new Date()
         };
 

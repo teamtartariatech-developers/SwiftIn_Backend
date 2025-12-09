@@ -371,6 +371,8 @@ router.post('/block-inventory', async (req, res) => {
             roomTypeId: { type: 'string', required: true, isObjectId: true },
             dates: { isArray: true, required: true, custom: (val) => Array.isArray(val) && val.length > 0 || 'Dates array must not be empty' },
             blockedInventory: { type: 'number', required: true, min: 0 },
+            blockedRooms: { isArray: true, default: [] },
+            blockType: { type: 'string', default: 'out-of-order', enum: ['out-of-order', 'out-of-service'] },
             reason: { type: 'string', default: 'Manual block' }
         };
 
@@ -379,15 +381,28 @@ router.post('/block-inventory', async (req, res) => {
             return res.status(400).json({ message: validation.errors.join(', ') });
         }
 
-        const { roomTypeId, dates, blockedInventory, reason } = validation.validated;
+        const { roomTypeId, dates, blockedInventory, blockedRooms, blockType, reason } = validation.validated;
         const propertyId = getPropertyId(req);
         const RoomType = getModel(req, 'RoomType');
         const InventoryBlock = getModel(req, 'InventoryBlock');
+        const Rooms = getModel(req, 'Rooms');
 
         // Verify room type exists
         const roomType = await RoomType.findOne({ _id: roomTypeId, property: propertyId });
         if (!roomType) {
             return res.status(404).json({ message: "Room type not found." });
+        }
+
+        // Validate blocked rooms if provided
+        if (blockedRooms && blockedRooms.length > 0) {
+            const validRooms = await Rooms.find({
+                _id: { $in: blockedRooms },
+                roomType: roomTypeId,
+                property: propertyId
+            });
+            if (validRooms.length !== blockedRooms.length) {
+                return res.status(400).json({ message: "Some blocked room IDs are invalid or don't belong to this room type." });
+            }
         }
 
         // Validate dates and convert to Date objects
@@ -407,6 +422,8 @@ router.post('/block-inventory', async (req, res) => {
                 update: { 
                     $set: { 
                         blockedInventory: blockedInventory,
+                        blockedRooms: blockedRooms || [],
+                        blockType: blockType || 'out-of-order',
                         reason: reason || 'Manual block',
                         createdBy: req.tenant.user?._id?.toString() || 'admin',
                         property: propertyId
@@ -427,6 +444,8 @@ router.post('/block-inventory', async (req, res) => {
         res.status(200).json({
             message: `Inventory blocked for ${dates.length} day(s). Modified: ${modifiedCount}, Created: ${upsertedCount}.`,
             blockedInventory: blockedInventory,
+            blockedRooms: blockedRooms,
+            blockType: blockType,
             dates: dates
         });
 
@@ -481,6 +500,153 @@ router.get('/inventory-blocks', async (req, res) => {
     } catch (error) {
         console.error("Error fetching inventory blocks:", error);
         res.status(500).json({ message: "Server error fetching inventory blocks." });
+    }
+});
+
+// Get blocked rooms for StayView (returns room-level blocks)
+router.get('/blocked-rooms', async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+        const propertyId = getPropertyId(req);
+        const InventoryBlock = getModel(req, 'InventoryBlock');
+
+        if (!startDate || !endDate) {
+            return res.status(400).json({ message: "startDate and endDate are required." });
+        }
+
+        const start = new Date(startDate + 'T00:00:00.000Z');
+        const end = new Date(endDate + 'T23:59:59.999Z');
+
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+            return res.status(400).json({ message: "Invalid date format. Use YYYY-MM-DD." });
+        }
+
+        // Get all inventory blocks with blocked rooms for the date range
+        const blocks = await InventoryBlock.find({
+            property: propertyId,
+            date: { $gte: start, $lte: end },
+            blockedRooms: { $exists: true, $ne: [] }
+        })
+        .populate('roomType', 'name')
+        .populate('blockedRooms', 'roomNumber roomType')
+        .sort({ date: 1 });
+
+        // Transform into a format suitable for StayView
+        const blockedRoomData = [];
+        blocks.forEach(block => {
+            if (block.blockedRooms && block.blockedRooms.length > 0) {
+                block.blockedRooms.forEach(room => {
+                    blockedRoomData.push({
+                        date: block.date,
+                        roomId: room._id,
+                        roomNumber: room.roomNumber,
+                        roomTypeId: block.roomType._id,
+                        roomTypeName: block.roomType.name,
+                        blockType: block.blockType,
+                        reason: block.reason
+                    });
+                });
+            }
+        });
+
+        res.status(200).json(blockedRoomData);
+
+    } catch (error) {
+        console.error("Error fetching blocked rooms:", error);
+        res.status(500).json({ message: "Server error fetching blocked rooms." });
+    }
+});
+
+// Get blocked rooms grouped by date range (for StayView bars)
+router.get('/blocked-rooms-ranges', async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+        const propertyId = getPropertyId(req);
+        const InventoryBlock = getModel(req, 'InventoryBlock');
+
+        if (!startDate || !endDate) {
+            return res.status(400).json({ message: "startDate and endDate are required." });
+        }
+
+        const start = new Date(startDate + 'T00:00:00.000Z');
+        const end = new Date(endDate + 'T23:59:59.999Z');
+
+        if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+            return res.status(400).json({ message: "Invalid date format. Use YYYY-MM-DD." });
+        }
+
+        // Get all inventory blocks with blocked rooms for the date range
+        const blocks = await InventoryBlock.find({
+            property: propertyId,
+            date: { $gte: start, $lte: end },
+            blockedRooms: { $exists: true, $ne: [] }
+        })
+        .populate('roomType', 'name')
+        .populate('blockedRooms', 'roomNumber roomType')
+        .sort({ date: 1 });
+
+        // Group consecutive dates for the same room into ranges
+        const roomBlockMap = new Map(); // roomId -> [{startDate, endDate, blockType, reason, roomNumber, roomTypeId}]
+
+        blocks.forEach(block => {
+            if (block.blockedRooms && block.blockedRooms.length > 0) {
+                block.blockedRooms.forEach(room => {
+                    const roomId = room._id.toString();
+                    const blockDate = new Date(block.date);
+                    blockDate.setHours(0, 0, 0, 0);
+                    
+                    if (!roomBlockMap.has(roomId)) {
+                        roomBlockMap.set(roomId, []);
+                    }
+                    
+                    const roomBlocks = roomBlockMap.get(roomId);
+                    const lastBlock = roomBlocks.length > 0 ? roomBlocks[roomBlocks.length - 1] : null;
+                    
+                    // Check if this date is consecutive to the last block (and same blockType)
+                    if (lastBlock) {
+                        const lastEndDate = new Date(lastBlock.endDate);
+                        lastEndDate.setDate(lastEndDate.getDate() + 1);
+                        lastEndDate.setHours(0, 0, 0, 0);
+                        
+                        if (lastEndDate.getTime() === blockDate.getTime() && 
+                            lastBlock.blockType === block.blockType &&
+                            lastBlock.reason === block.reason) {
+                            // Extend the last block
+                            lastBlock.endDate = block.date;
+                            return;
+                        }
+                    }
+                    
+                    // Create a new block range
+                    roomBlocks.push({
+                        startDate: block.date,
+                        endDate: block.date,
+                        blockType: block.blockType,
+                        reason: block.reason,
+                        roomNumber: room.roomNumber,
+                        roomTypeId: block.roomType._id,
+                        roomTypeName: block.roomType.name
+                    });
+                });
+            }
+        });
+
+        // Flatten the map into an array
+        const blockedRanges = [];
+        roomBlockMap.forEach((ranges, roomId) => {
+            ranges.forEach(range => {
+                blockedRanges.push({
+                    roomId,
+                    ...range
+                });
+            });
+        });
+
+        res.status(200).json(blockedRanges);
+
+    } catch (error) {
+        console.error("Error fetching blocked room ranges:", error);
+        res.status(500).json({ message: "Server error fetching blocked room ranges." });
     }
 });
 

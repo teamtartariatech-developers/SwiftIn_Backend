@@ -17,6 +17,17 @@ const inventoryBlockSchema = new mongoose.Schema({
         min: 0,
         default: 0
     },
+    // Specific rooms that are blocked (optional - if empty, it's just a count-based block)
+    blockedRooms: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Rooms'
+    }],
+    // Type of block: out-of-order (major issue) or out-of-service (minor/temporary)
+    blockType: {
+        type: String,
+        enum: ['out-of-order', 'out-of-service'],
+        default: 'out-of-order'
+    },
     reason: {
         type: String,
         default: 'Manual block'
