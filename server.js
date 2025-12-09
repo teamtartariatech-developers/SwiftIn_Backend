@@ -28,11 +28,41 @@ const { initWebsockets } = require('./services/websocketManager');
 
 app.use(express.json());
 
-// Enable CORS for all routes
+// Enable CORS for specific origins only
+const allowedOrigins = [
+    'https://app.swif10.com'
+];
+
+// Function to check if origin is allowed
+const isOriginAllowed = (origin) => {
+    if (!origin) return false;
+    
+    // Check exact match in allowed origins
+    if (allowedOrigins.includes(origin)) {
+        return true;
+    }
+    
+    // Allow localhost with any port
+    const localhostRegex = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+    if (localhostRegex.test(origin)) {
+        return true;
+    }
+    
+    return false;
+};
+
 app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
+    const origin = req.headers.origin;
+    
+    // Check if origin is allowed
+    if (origin && isOriginAllowed(origin)) {
+        res.header('Access-Control-Allow-Origin', origin);
+    }
+    
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    
     if (req.method === 'OPTIONS') {
         res.sendStatus(200);
     } else {
