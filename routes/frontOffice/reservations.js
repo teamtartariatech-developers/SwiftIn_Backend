@@ -445,7 +445,8 @@ router.post('/', async (req, res) => {
             totalAmount: { type: 'number', default: 0, min: 0 },
             payedAmount: { type: 'number', default: 0, min: 0 },
             paymentMethod: { type: 'string', default: 'Cash' },
-            Source: { type: 'string', default: 'direct', enum: ['direct', 'booking.com', 'agoda', 'expedia', 'airbnb', 'phone', 'walk-in'] },
+            Source: { type: 'string', default: 'direct', enum: ['direct', 'website', 'booking.com', 'agoda', 'expedia', 'airbnb', 'phone', 'walk-in', 'travel-agent'] },
+            travelAgentId: { type: 'string', isObjectId: true },
             adhaarNumber: { type: 'string', default: '' },
             status: { type: 'string', default: 'confirmed', enum: ['confirmed', 'checked-in', 'checked-out', 'cancelled'] },
             mealPlan: { type: 'string', default: 'EP', enum: ['EP', 'CP', 'MAP', 'AP'] },
@@ -629,6 +630,41 @@ router.post('/', async (req, res) => {
         });
 
         await reservation.save();
+        
+        // Handle travel agent commission if travel agent is selected
+        if (validation.validated.Source === 'travel-agent' && validation.validated.travelAgentId) {
+            try {
+                const TravelAgent = getModel(req, 'TravelAgent');
+                const travelAgent = await TravelAgent.findOne({
+                    _id: validation.validated.travelAgentId,
+                    property: propertyId
+                });
+                
+                if (travelAgent) {
+                    // Calculate commission
+                    let commissionAmount = 0;
+                    if (travelAgent.commissionType === 'percentage') {
+                        commissionAmount = (validation.validated.totalAmount * travelAgent.commissionRate) / 100;
+                    } else {
+                        commissionAmount = travelAgent.commissionRate; // Fixed amount
+                    }
+                    
+                    // Update travel agent stats
+                    travelAgent.totalBookings += 1;
+                    travelAgent.totalRevenue += validation.validated.totalAmount;
+                    travelAgent.totalCommission += commissionAmount;
+                    travelAgent.calculateCommission(); // Recalculate outstanding
+                    await travelAgent.save();
+                    
+                    // Store commission in reservation (if reservation schema supports it)
+                    // You may need to add a commissionAmount field to the reservation schema
+                    console.log(`Travel agent commission calculated: ₹${commissionAmount} for agent ${travelAgent.agentCode}`);
+                }
+            } catch (error) {
+                console.error('Error calculating travel agent commission:', error);
+                // Don't fail reservation creation if commission calculation fails
+            }
+        }
         
         // Check if check-in date is today - if so, create folio and guest profile automatically
         if (reservation.checkInDate) {
@@ -956,7 +992,8 @@ router.put('/:id', async (req, res) => {
             totalAmount: { type: 'number', min: 0 },
             payedAmount: { type: 'number', min: 0 },
             paymentMethod: { type: 'string' },
-            Source: { type: 'string', enum: ['direct', 'booking.com', 'agoda', 'expedia', 'airbnb', 'phone', 'walk-in'] },
+            Source: { type: 'string', enum: ['direct', 'website', 'booking.com', 'agoda', 'expedia', 'airbnb', 'phone', 'walk-in', 'travel-agent'] },
+            travelAgentId: { type: 'string', isObjectId: true },
             status: { type: 'string', enum: ['confirmed', 'checked-in', 'checked-out', 'cancelled'] },
             mealPlan: { type: 'string', enum: ['EP', 'CP', 'MAP', 'AP'] },
             mealPlanAmount: { type: 'number', min: 0 },
@@ -997,6 +1034,85 @@ router.put('/:id', async (req, res) => {
             return res.status(404).json({ message: 'Reservation not found.' });
         }
 
+        // Handle travel agent commission if travel agent is added or changed
+        if (validation.validated.Source === 'travel-agent' && validation.validated.travelAgentId) {
+            try {
+                const TravelAgent = getModel(req, 'TravelAgent');
+                const travelAgent = await TravelAgent.findOne({
+                    _id: validation.validated.travelAgentId,
+                    property: getPropertyId(req)
+                });
+                
+                if (travelAgent) {
+                    // Check if this is a new travel agent assignment or update
+                    const wasTravelAgent = oldReservation && oldReservation.Source === 'travel-agent' && oldReservation.travelAgentId;
+                    const isNewAssignment = !wasTravelAgent || oldReservation.travelAgentId?.toString() !== validation.validated.travelAgentId.toString();
+                    const amountChanged = validation.validated.totalAmount && oldReservation && oldReservation.totalAmount !== validation.validated.totalAmount;
+                    
+                    if (isNewAssignment || amountChanged) {
+                        // Calculate commission
+                        let commissionAmount = 0;
+                        if (travelAgent.commissionType === 'percentage') {
+                            commissionAmount = ((validation.validated.totalAmount || reservation.totalAmount || 0) * travelAgent.commissionRate) / 100;
+                        } else {
+                            commissionAmount = travelAgent.commissionRate; // Fixed amount
+                        }
+                        
+                        // If this was a previous travel agent, subtract their commission
+                        if (wasTravelAgent && oldReservation.travelAgentId && oldReservation.travelAgentId.toString() !== validation.validated.travelAgentId.toString()) {
+                            const oldAgent = await TravelAgent.findOne({
+                                _id: oldReservation.travelAgentId,
+                                property: getPropertyId(req)
+                            });
+                            if (oldAgent) {
+                                const oldCommission = oldAgent.commissionType === 'percentage' 
+                                    ? ((oldReservation.totalAmount || 0) * oldAgent.commissionRate) / 100
+                                    : oldAgent.commissionRate;
+                                oldAgent.totalBookings = Math.max(0, oldAgent.totalBookings - 1);
+                                oldAgent.totalRevenue = Math.max(0, oldAgent.totalRevenue - (oldReservation.totalAmount || 0));
+                                oldAgent.totalCommission = Math.max(0, oldAgent.totalCommission - oldCommission);
+                                oldAgent.calculateCommission();
+                                await oldAgent.save();
+                            }
+                        }
+                        
+                        // Update new travel agent stats
+                        if (isNewAssignment) {
+                            travelAgent.totalBookings += 1;
+                        }
+                        travelAgent.totalRevenue = Math.max(0, travelAgent.totalRevenue - (oldReservation?.totalAmount || 0) + (validation.validated.totalAmount || reservation.totalAmount || 0));
+                        travelAgent.totalCommission = Math.max(0, travelAgent.totalCommission - (wasTravelAgent && !isNewAssignment ? 0 : (oldReservation?.totalAmount || 0) * travelAgent.commissionRate / 100) + commissionAmount);
+                        travelAgent.calculateCommission();
+                        await travelAgent.save();
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating travel agent commission:', error);
+                // Don't fail reservation update if commission calculation fails
+            }
+        } else if (oldReservation && oldReservation.Source === 'travel-agent' && oldReservation.travelAgentId && validation.validated.Source !== 'travel-agent') {
+            // Travel agent was removed, subtract commission
+            try {
+                const TravelAgent = getModel(req, 'TravelAgent');
+                const oldAgent = await TravelAgent.findOne({
+                    _id: oldReservation.travelAgentId,
+                    property: getPropertyId(req)
+                });
+                if (oldAgent) {
+                    const oldCommission = oldAgent.commissionType === 'percentage' 
+                        ? ((oldReservation.totalAmount || 0) * oldAgent.commissionRate) / 100
+                        : oldAgent.commissionRate;
+                    oldAgent.totalBookings = Math.max(0, oldAgent.totalBookings - 1);
+                    oldAgent.totalRevenue = Math.max(0, oldAgent.totalRevenue - (oldReservation.totalAmount || 0));
+                    oldAgent.totalCommission = Math.max(0, oldAgent.totalCommission - oldCommission);
+                    oldAgent.calculateCommission();
+                    await oldAgent.save();
+                }
+            } catch (error) {
+                console.error('Error removing travel agent commission:', error);
+            }
+        }
+        
         // If status is being updated to 'checked-in', create folio automatically
         if (req.body.status === 'checked-in' && (!oldReservation || oldReservation.status !== 'checked-in')) {
             await createFolioForReservation(req, reservation);

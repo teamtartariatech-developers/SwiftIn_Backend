@@ -47,6 +47,7 @@ function loadBaseSchema(modelName) {
         TravelAgent: require('../db/travelAgent').schema,
         PaymasterRoom: require('../db/paymaster').schema,
         GroupReservation: require('../db/groupReservation').schema,
+        dynamicPricingRules: require('../db/dynamicPricingRules').schema,
     };
 
     const schema = schemaMap[modelName];
@@ -103,6 +104,7 @@ function registerModels(connection) {
         'TravelAgent',
         'PaymasterRoom',
         'GroupReservation',
+        'dynamicPricingRules',
     ].forEach((name) => {
         if (!connection.models[name]) {
             const baseSchema = loadBaseSchema(name);
