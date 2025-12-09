@@ -54,20 +54,35 @@ const isOriginAllowed = (origin) => {
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     
-    // Check if origin is allowed
-    if (origin && isOriginAllowed(origin)) {
-        res.header('Access-Control-Allow-Origin', origin);
+    // Debug logging (remove in production)
+    if (origin) {
+        console.log(`[CORS] Request from origin: ${origin}, Method: ${req.method}, Path: ${req.path}`);
+        console.log(`[CORS] Origin allowed: ${isOriginAllowed(origin)}`);
     }
     
+    // Always set CORS headers for preflight requests
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
     res.header('Access-Control-Allow-Credentials', 'true');
     
+    // Handle preflight OPTIONS request
     if (req.method === 'OPTIONS') {
-        res.sendStatus(200);
-    } else {
-        next();
+        // Only set Access-Control-Allow-Origin if origin is allowed
+        if (origin && isOriginAllowed(origin)) {
+            res.header('Access-Control-Allow-Origin', origin);
+            console.log(`[CORS] Preflight allowed for: ${origin}`);
+        } else {
+            console.log(`[CORS] Preflight rejected for: ${origin || 'no origin'}`);
+        }
+        return res.sendStatus(200);
     }
+    
+    // For actual requests, only set Access-Control-Allow-Origin if origin is allowed
+    if (origin && isOriginAllowed(origin)) {
+        res.header('Access-Control-Allow-Origin', origin);
+    }
+    
+    next();
 });
 
 dotenv.config();
