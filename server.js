@@ -30,7 +30,8 @@ app.use(express.json());
 
 // Enable CORS for specific origins only
 const allowedOrigins = [
-    'https://app.swif10.com'
+    'https://app.swif10.com',
+    'https://www.app.swif10.com'
 ];
 
 // Function to check if origin is allowed
