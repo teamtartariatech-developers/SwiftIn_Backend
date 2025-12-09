@@ -192,7 +192,6 @@ router.post('/', async (req, res) => {
         await group.save();
         
         // Block inventory for group reservation dates
-        const InventoryBlock = getModel(req, 'InventoryBlock');
         const dateObjects = [];
         const checkIn = new Date(dateValidation.checkIn);
         const checkOut = new Date(dateValidation.checkOut);
