@@ -249,15 +249,33 @@ router.put('/updateRoom/:roomId', requireModuleAccess('housekeeping'), async (re
 
 router.post('/addRoomType', requireModuleAccess('settings'), async (req,res) => {
     try{
+        const propertyId = getPropertyId(req);
+        const property = req.tenant.property;
+        const allowedRooms = property.allowedrooms || 15;
+        
+        const RoomType = getModel(req, 'RoomType');
+        
+        // Check total inventory limit
+        const existingRoomTypes = await RoomType.find({ property: propertyId });
+        const currentTotalInventory = existingRoomTypes.reduce((sum, rt) => sum + rt.totalInventory, 0);
+        const newInventory = req.body.totalInventory || 0;
+        const newTotalInventory = currentTotalInventory + newInventory;
+        
+        if (newTotalInventory > allowedRooms) {
+            return res.status(400).json({ 
+                message: `Your plan is for ${allowedRooms} rooms. The combined inventory of all room types cannot exceed this limit.` 
+            });
+        }
+        
         const roomTypeData = {
             ...req.body,
-            property: getPropertyId(req),
+            property: propertyId,
         };
-        const RoomType = getModel(req, 'RoomType');
         const newRoomType = new RoomType(roomTypeData);
         await newRoomType.save()
         res.status(200).json({message:"Successfully added new room type", newRoomType})
     }catch(error){
+        console.error('Error adding room type:', error);
         res.status(500).json({message: "Server error uploading room type."})
     }
 })
@@ -265,19 +283,46 @@ router.post('/addRoomType', requireModuleAccess('settings'), async (req,res) => 
 router.put('/roomType/:id', requireModuleAccess('settings'), async (req, res) => {
     try {
         const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const property = req.tenant.property;
+        const allowedRooms = property.allowedrooms || 15;
+        
+        const RoomType = getModel(req, 'RoomType');
+        
+        // Check if room type exists
+        const existingRoomType = await RoomType.findOne({ _id: id, property: propertyId });
+        if (!existingRoomType) {
+            return res.status(404).json({ message: "Room type not found." });
+        }
+        
+        // Check total inventory limit if totalInventory is being updated
+        if (req.body.totalInventory !== undefined) {
+            const existingRoomTypes = await RoomType.find({ property: propertyId });
+            const currentTotalInventory = existingRoomTypes.reduce((sum, rt) => {
+                // Exclude the room type being updated from the sum
+                if (rt._id.toString() === id) {
+                    return sum;
+                }
+                return sum + rt.totalInventory;
+            }, 0);
+            const newInventory = req.body.totalInventory || 0;
+            const newTotalInventory = currentTotalInventory + newInventory;
+            
+            if (newTotalInventory > allowedRooms) {
+                return res.status(400).json({ 
+                    message: `Your plan is for ${allowedRooms} rooms. The combined inventory of all room types cannot exceed this limit.` 
+                });
+            }
+        }
+        
         const updateData = { ...req.body };
         delete updateData.property;
 
-        const RoomType = getModel(req, 'RoomType');
         const updatedRoomType = await RoomType.findOneAndUpdate(
-            { _id: id, property: getPropertyId(req) },
+            { _id: id, property: propertyId },
             updateData,
             { new: true, runValidators: true }
         );
-
-        if (!updatedRoomType) {
-            return res.status(404).json({ message: "Room type not found." });
-        }
 
         res.status(200).json({
             message: "Room type updated successfully.",

@@ -25,6 +25,11 @@ const propertySchema = new mongoose.Schema(
             country: String,
             timeZone: String,
         },
+        allowedrooms: {
+            type: Number,
+            default: 15,
+            min: 1,
+        },
     },
     { timestamps: true }
 );

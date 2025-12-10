@@ -148,6 +148,24 @@ router.put('/property', async (req, res) => {
   }
 });
 
+// Get Property model info (including allowedrooms)
+router.get('/property/info', async (req, res) => {
+  try {
+    const property = req.tenant.property;
+    res.status(200).json({
+      _id: property._id,
+      name: property.name,
+      code: property.code,
+      status: property.status,
+      allowedrooms: property.allowedrooms || 15,
+      metadata: property.metadata,
+    });
+  } catch (error) {
+    console.error('Error fetching property info:', error);
+    res.status(500).json({ message: 'Server error fetching property info.' });
+  }
+});
+
 // ===== EMAIL INTEGRATION ROUTES =====
 
 router.get('/integrations/email', async (req, res) => {
