@@ -17,13 +17,21 @@ const connectDB = async () => {
     console.log(`🔄 Attempting to connect to MongoDB Atlas...`);
     console.log(`   Hostname: ${hostname}`);
 
-    // Set connection options
+    // Set connection options with optimized pooling for performance
     const options = {
       serverSelectionTimeoutMS: 10000, // 10 seconds timeout
       socketTimeoutMS: 45000,
       connectTimeoutMS: 10000,
       retryWrites: true,
-      w: 'majority'
+      w: 'majority',
+      // Connection pool optimization for high performance
+      maxPoolSize: 50, // Maximum number of connections in the pool
+      minPoolSize: 5, // Minimum number of connections to maintain
+      maxIdleTimeMS: 30000, // Close connections after 30 seconds of inactivity
+      // Buffer settings for better performance
+      bufferCommands: false, // Disable mongoose buffering
+      // Read preference for better performance
+      readPreference: 'primaryPreferred', // Prefer primary but allow reads from secondaries
     };
 
     await mongoose.connect(mongoUri, options);

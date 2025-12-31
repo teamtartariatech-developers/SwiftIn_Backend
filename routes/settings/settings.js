@@ -54,11 +54,16 @@ router.get('/property', async (req, res) => {
   try {
     const propertyId = getPropertyId(req);
     const PropertyDetails = getModel(req, 'PropertyDetails');
-    let property = await PropertyDetails.findOne({ property: propertyId });
+    const { getPropertySettings } = require('../../services/cacheService');
     
-    // If no property exists, create default one
+    // Try cache first, then database
+    let property = await getPropertySettings(propertyId, async () => {
+      return await PropertyDetails.findOne({ property: propertyId }).lean();
+    });
+    
+    // If not found in cache/db, create default
     if (!property) {
-      property = new PropertyDetails({
+      const newProperty = new PropertyDetails({
         propertyName: 'Phoenix Hotel & Resort',
         address: '123 Business District, Mumbai, Maharashtra 400001',
         phone: '+91 22 1234 5678',
@@ -75,7 +80,12 @@ router.get('/property', async (req, res) => {
         serviceChargeRate: 10,
         property: propertyId
       });
-      await property.save();
+      await newProperty.save();
+      property = newProperty.toObject();
+      
+      // Invalidate cache
+      const { invalidatePropertySettings } = require('../../services/cacheService');
+      await invalidatePropertySettings(propertyId);
     }
     
     res.status(200).json(property);

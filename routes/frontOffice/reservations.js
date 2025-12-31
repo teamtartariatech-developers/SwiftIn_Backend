@@ -124,10 +124,13 @@ const createFolioForReservation = async (req, reservation) => {
             }
         }
         
-        // Fetch active tax rules
-        const activeTaxRules = await TaxRule.find({
-            property: propertyId,
-            isActive: true
+        // Fetch active tax rules (use lean and cache)
+        const { getTaxRules } = require('../../services/cacheService');
+        const activeTaxRules = await getTaxRules(propertyId, async () => {
+            return await TaxRule.find({
+                property: propertyId,
+                isActive: true
+            }).lean();
         });
         
         // Calculate and add tax items
@@ -156,10 +159,13 @@ const createFolioForReservation = async (req, reservation) => {
             }
         });
         
-        // Fetch active service fees
-        const activeServiceFees = await ServiceFee.find({
-            property: propertyId,
-            isActive: true
+        // Fetch active service fees (use lean and cache)
+        const { getServiceFees } = require('../../services/cacheService');
+        const activeServiceFees = await getServiceFees(propertyId, async () => {
+            return await ServiceFee.find({
+                property: propertyId,
+                isActive: true
+            }).lean();
         });
         
         // Calculate guest count for per-person calculations
@@ -455,7 +461,8 @@ router.post('/', async (req, res) => {
             mealPlanNights: { type: 'number', default: 0, min: 0 },
             mealPlanRate: { type: 'number', default: 0, min: 0 },
             roomNumbers: { isArray: true, default: [] },
-            notes: { isArray: true, default: [] } // notes is an array of note objects, not a string
+            notes: { isArray: true, default: [] }, // notes is an array of note objects, not a string
+            mealPreferences: { isObject: true, default: { veg: 0, nonVeg: 0, jain: 0 } }
         };
 
         const validation = validateAndSetDefaults(req.body, reservationSchema);
@@ -469,12 +476,12 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ message: dateValidation.errors.join(', ') });
         }
 
-        // Validate minimum stay requirement
+        // Validate minimum stay requirement (use lean for performance)
         const RoomType = getModel(req, 'RoomType');
         const roomType = await RoomType.findOne({
             _id: validation.validated.roomType,
             property: getPropertyId(req),
-        });
+        }).lean();
 
         if (!roomType) {
             return res.status(404).json({ message: 'Room type not found.' });
@@ -584,7 +591,9 @@ router.post('/', async (req, res) => {
                 checkInDate: { $lt: checkOut },
                 checkOutDate: { $gt: checkIn },
                 status: { $nin: ['cancelled', 'no-show'] }
-            });
+            })
+            .select('roomNumbers') // Only select roomNumbers field
+            .lean(); // Use lean() for better performance
             
             // Extract occupied room IDs
             const occupiedRoomIds = new Set();
@@ -801,7 +810,8 @@ router.get('/', async (req, res) => {
             Reservations.find(query)
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .sort({ createdAt: -1, checkInDate: 1 }),
+                .sort({ createdAt: -1, checkInDate: 1 })
+                .lean(), // Use lean() for better performance
         ]);
 
         res.status(200).json({
@@ -822,7 +832,9 @@ router.get('/', async (req, res) => {
 router.get('/all', async (req, res) => {
     try {
         const Reservations = getModel(req, 'Reservations');
-        const reservations = await Reservations.find({ property: getPropertyId(req) }).sort({ createdAt: -1 });
+        const reservations = await Reservations.find({ property: getPropertyId(req) })
+            .sort({ createdAt: -1 })
+            .lean(); // Use lean() for better performance
         res.status(200).json(reservations);
     } catch (error) {
         console.error('Error fetching reservations list:', error);
@@ -868,7 +880,8 @@ router.get('/departures/:date', async (req, res) => {
             Reservations.find(query)
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .sort({ checkOutDate: 1, guestName: 1 }),
+                .sort({ checkOutDate: 1, guestName: 1 })
+                .lean(), // Use lean() for better performance
         ]);
 
         res.status(200).json({
@@ -924,7 +937,8 @@ router.get('/arrivals/:date', async (req, res) => {
             Reservations.find(query)
                 .skip(skip)
                 .limit(parseInt(limit, 10))
-                .sort({ checkInDate: 1, guestName: 1 }),
+                .sort({ checkInDate: 1, guestName: 1 })
+                .lean(), // Use lean() for better performance
         ]);
 
         res.status(200).json({
@@ -999,7 +1013,8 @@ router.put('/:id', async (req, res) => {
             mealPlanAmount: { type: 'number', min: 0 },
             mealPlanGuestCount: { type: 'number', min: 0 },
             mealPlanNights: { type: 'number', min: 0 },
-            mealPlanRate: { type: 'number', min: 0 }
+            mealPlanRate: { type: 'number', min: 0 },
+            mealPreferences: { isObject: true }
         };
 
         const validation = validateAndSetDefaults(req.body, updateSchema);

@@ -170,7 +170,8 @@ router.get('/guests', async (req, res) => {
         const guests = await guestProfiles.find(searchQuery)
             .skip(skip)
             .limit(limit)
-            .sort({ createdAt: -1 });
+            .sort({ createdAt: -1 })
+            .lean(); // Use lean() for better performance
         
         // Calculate pagination info
         const totalPages = Math.ceil(total / limit);

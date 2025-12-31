@@ -1,8 +1,12 @@
 const mongoose = require('mongoose');
+const { cacheGet, cacheSet } = require('./redisClient');
 
 const cachedTenants = new Map();
 const baseSchemas = new Map();
 const codeToDbName = new Map();
+
+// Cache TTL for tenant context (30 minutes)
+const TENANT_CONTEXT_TTL = 1800;
 
 const SYSTEM_DATABASES = new Set(['admin', 'local', 'config']);
 
@@ -185,12 +189,34 @@ async function getTenantContext(propertyCode) {
     }
 
     const normalizedCode = sanitizeCode(propertyCode);
+    
+    // Check Redis cache first for property metadata
+    const cacheKey = `tenant:property:${normalizedCode}`;
+    let cachedProperty = await cacheGet(cacheKey);
+    
+    if (cachedProperty) {
+        // Use cached property data, but still need to get connection/models
+        const { dbName, tenant } = await resolveTenant(normalizedCode);
+        
+        // Update tenant property from cache
+        tenant.property = cachedProperty;
+        
+        return {
+            code: normalizedCode,
+            dbName,
+            connection: tenant.connection,
+            models: tenant.models,
+            property: cachedProperty,
+        };
+    }
+
+    // Cache miss - resolve tenant normally
     const { dbName, tenant } = await resolveTenant(normalizedCode);
 
     let property = tenant.property;
     if (!property || property.code !== normalizedCode) {
         const propertyModel = tenant.models.Property;
-        property = await propertyModel.findOne({ code: normalizedCode });
+        property = await propertyModel.findOne({ code: normalizedCode }).lean();
         if (!property) {
             codeToDbName.delete(normalizedCode);
             cachedTenants.delete(dbName);
@@ -198,6 +224,13 @@ async function getTenantContext(propertyCode) {
         }
         tenant.property = property;
     }
+
+    // Cache property data (convert _id to string for JSON serialization)
+    const propertyToCache = {
+        ...property,
+        _id: property._id.toString(),
+    };
+    await cacheSet(cacheKey, propertyToCache, TENANT_CONTEXT_TTL);
 
     const preferredDbName =
         typeof property.metadata?.dbName === 'string'

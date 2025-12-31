@@ -29,10 +29,11 @@ router.get('/', async (req, res) => {
         }
         
         const folios = await GuestFolio.find(query)
-            .populate('reservationId')
-            .populate('paymasterId')
-            .populate('groupId')
-            .sort({ createdAt: -1 });
+            .populate('reservationId', 'guestName guestEmail checkInDate checkOutDate status')
+            .populate('paymasterId', 'name email')
+            .populate('groupId', 'groupName')
+            .sort({ createdAt: -1 })
+            .lean(); // Use lean() for better performance
         
         res.status(200).json(folios);
     } catch (error) {
@@ -55,7 +56,11 @@ router.get('/:id', async (req, res) => {
         const folio = await GuestFolio.findOne({
             _id: id,
             property: getPropertyId(req),
-        }).populate('reservationId').populate('paymasterId').populate('groupId');
+        })
+        .populate('reservationId', 'guestName guestEmail checkInDate checkOutDate status')
+        .populate('paymasterId', 'name email')
+        .populate('groupId', 'groupName')
+        .lean(); // Use lean() for better performance
         
         if (!folio) {
             return res.status(404).json({ message: "Folio not found." });
@@ -858,6 +863,193 @@ router.get('/bills/:id', async (req, res) => {
     }
 });
 
+// Generate HTML invoice template
+const generateInvoiceHTML = (folio, propertyDetails, isPaymaster = false) => {
+    const formatDate = (date) => {
+        if (!date) return '';
+        return new Date(date).toLocaleDateString('en-GB', { 
+            day: '2-digit', 
+            month: '2-digit', 
+            year: 'numeric' 
+        });
+    };
+
+    const formatCurrency = (amount) => {
+        return `₹${(amount || 0).toLocaleString('en-IN', { 
+            minimumFractionDigits: 2, 
+            maximumFractionDigits: 2 
+        })}`;
+    };
+
+    const propertyName = propertyDetails?.name || 'Hotel';
+    const propertyAddress = propertyDetails?.address || '';
+    const propertyPhone = propertyDetails?.phone || '';
+    const propertyEmail = propertyDetails?.email || '';
+    const gstin = propertyDetails?.gstin || '';
+
+    // Build charges table
+    let chargesTableRows = '';
+    if (folio.items && folio.items.length > 0) {
+        folio.items.forEach(item => {
+            const itemAmount = ((item.amount || 0) + (item.tax || 0) - (item.discount || 0)) * (item.quantity || 1);
+            chargesTableRows += `
+                <tr>
+                    <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${formatDate(item.date)}</td>
+                    <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; color: #111827;">${(item.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
+                    <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; color: #6b7280;">${item.department || 'Other'}</td>
+                    <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: right; color: #111827; font-weight: 500;">${formatCurrency(itemAmount)}</td>
+                </tr>
+            `;
+        });
+    } else {
+        chargesTableRows = `
+            <tr>
+                <td colspan="4" style="padding: 20px; text-align: center; color: #6b7280; font-style: italic;">No charges available</td>
+            </tr>
+        `;
+    }
+
+    // Build payments table
+    let paymentsTableRows = '';
+    if (folio.payments && folio.payments.length > 0) {
+        folio.payments.forEach(payment => {
+            paymentsTableRows += `
+                <tr>
+                    <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; color: #374151;">${formatDate(payment.date)}</td>
+                    <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; color: #111827;">${payment.method || 'N/A'}</td>
+                    <td style="padding: 12px; border-bottom: 1px solid #e5e7eb; text-align: right; color: #059669; font-weight: 500;">${formatCurrency(payment.amount)}</td>
+                </tr>
+            `;
+        });
+    } else {
+        paymentsTableRows = `
+            <tr>
+                <td colspan="3" style="padding: 20px; text-align: center; color: #6b7280; font-style: italic;">No payments available</td>
+            </tr>
+        `;
+    }
+
+    const roomNumberDisplay = folio.roomNumbers && folio.roomNumbers.length > 0 
+        ? folio.roomNumbers.join(', ') 
+        : (folio.roomNumber || 'N/A');
+
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invoice - ${folio.folioId}</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f3f4f6;">
+    <div style="max-width: 800px; margin: 0 auto; padding: 40px 20px; background-color: #ffffff;">
+        <!-- Header -->
+        <div style="border-bottom: 2px solid #e5e7eb; padding-bottom: 30px; margin-bottom: 30px;">
+            <h1 style="margin: 0; font-size: 28px; font-weight: bold; color: #111827;">${propertyName.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</h1>
+            ${propertyAddress ? `<p style="margin: 8px 0 0 0; color: #6b7280; font-size: 14px;">${propertyAddress.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>` : ''}
+            <div style="margin-top: 12px; font-size: 14px; color: #6b7280;">
+                ${propertyPhone ? `<span>Phone: ${propertyPhone.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>` : ''}
+                ${propertyEmail ? `<span style="margin-left: 16px;">Email: ${propertyEmail.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>` : ''}
+            </div>
+            ${gstin ? `<p style="margin: 8px 0 0 0; color: #6b7280; font-size: 14px;">GSTIN: ${gstin.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>` : ''}
+        </div>
+
+        <!-- Invoice Title -->
+        <div style="margin-bottom: 30px;">
+            <h2 style="margin: 0 0 10px 0; font-size: 24px; font-weight: bold; color: #111827;">Invoice</h2>
+            <p style="margin: 0; color: #6b7280; font-size: 14px;">Folio #${folio.folioId}</p>
+            <p style="margin: 4px 0 0 0; color: #6b7280; font-size: 14px;">Date: ${formatDate(new Date())}</p>
+        </div>
+
+        <!-- Guest Information -->
+        <div style="background-color: #f9fafb; padding: 20px; border-radius: 8px; margin-bottom: 30px;">
+            <h3 style="margin: 0 0 16px 0; font-size: 16px; font-weight: 600; color: #111827;">${isPaymaster && folio.paymasterId ? 'Account Information' : 'Guest Information'}</h3>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; font-size: 14px;">
+                <div>
+                    <p style="margin: 0 0 4px 0; color: #6b7280;">${isPaymaster && folio.paymasterId ? 'Account Name' : 'Guest Name'}</p>
+                    <p style="margin: 0; color: #111827; font-weight: 500;">${folio.guestName.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
+                </div>
+                ${!isPaymaster ? `
+                <div>
+                    <p style="margin: 0 0 4px 0; color: #6b7280;">Room Number</p>
+                    <p style="margin: 0; color: #111827; font-weight: 500;">${roomNumberDisplay}</p>
+                </div>
+                ` : ''}
+                <div>
+                    <p style="margin: 0 0 4px 0; color: #6b7280;">Check In</p>
+                    <p style="margin: 0; color: #111827; font-weight: 500;">${formatDate(folio.checkIn)}</p>
+                </div>
+                <div>
+                    <p style="margin: 0 0 4px 0; color: #6b7280;">Check Out</p>
+                    <p style="margin: 0; color: #111827; font-weight: 500;">${formatDate(folio.checkOut)}</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charges Table -->
+        <div style="margin-bottom: 30px;">
+            <h3 style="margin: 0 0 16px 0; font-size: 18px; font-weight: 600; color: #111827;">Charges</h3>
+            <table style="width: 100%; border-collapse: collapse; background-color: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+                <thead>
+                    <tr style="background-color: #f9fafb;">
+                        <th style="padding: 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb;">Date</th>
+                        <th style="padding: 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb;">Description</th>
+                        <th style="padding: 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb;">Department</th>
+                        <th style="padding: 12px; text-align: right; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb;">Amount</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${chargesTableRows}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Payments Table -->
+        <div style="margin-bottom: 30px;">
+            <h3 style="margin: 0 0 16px 0; font-size: 18px; font-weight: 600; color: #111827;">Payments</h3>
+            <table style="width: 100%; border-collapse: collapse; background-color: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+                <thead>
+                    <tr style="background-color: #f9fafb;">
+                        <th style="padding: 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb;">Date</th>
+                        <th style="padding: 12px; text-align: left; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb;">Method</th>
+                        <th style="padding: 12px; text-align: right; font-size: 12px; font-weight: 600; color: #6b7280; text-transform: uppercase; border-bottom: 1px solid #e5e7eb;">Amount</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${paymentsTableRows}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Summary -->
+        <div style="background-color: #f9fafb; padding: 24px; border-radius: 8px; border: 1px solid #e5e7eb;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 14px;">
+                <span style="color: #6b7280;">Total Charges:</span>
+                <span style="color: #111827; font-weight: 600;">${formatCurrency(folio.totalCharges || 0)}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 12px; font-size: 14px;">
+                <span style="color: #6b7280;">Total Payments:</span>
+                <span style="color: #059669; font-weight: 600;">${formatCurrency(folio.totalPayments || 0)}</span>
+            </div>
+            <div style="border-top: 2px solid #e5e7eb; padding-top: 16px; margin-top: 16px; display: flex; justify-content: space-between; font-size: 18px;">
+                <span style="color: #111827; font-weight: bold;">Balance Due:</span>
+                <span style="color: ${(folio.balance || 0) > 0 ? '#dc2626' : '#059669'}; font-weight: bold;">${formatCurrency(folio.balance || 0)}</span>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div style="margin-top: 40px; padding-top: 30px; border-top: 1px solid #e5e7eb; text-align: center; color: #6b7280; font-size: 12px;">
+            <p style="margin: 0;">Thank you for your stay!</p>
+            <p style="margin: 8px 0 0 0;">This is an automated invoice. Please contact us if you have any questions.</p>
+        </div>
+    </div>
+</body>
+</html>
+    `;
+
+    return html;
+};
+
 // Send folio email
 router.post('/:id/send-email', async (req, res) => {
     try {
@@ -870,7 +1062,6 @@ router.post('/:id/send-email', async (req, res) => {
         }
         
         const GuestFolio = getModel(req, 'GuestFolio');
-        const EmailTemplate = getModel(req, 'EmailTemplate');
         const PropertyDetails = getModel(req, 'PropertyDetails');
         const emailService = require('../../services/emailService');
         
@@ -878,37 +1069,14 @@ router.post('/:id/send-email', async (req, res) => {
         const folio = await GuestFolio.findOne({
             _id: id,
             property: propertyId
-        }).populate('reservationId').populate('paymasterId');
+        }).populate('reservationId').populate('paymasterId').lean();
         
         if (!folio) {
             return res.status(404).json({ message: 'Folio not found' });
         }
         
-        // Determine template name based on folio type
-        const isPaymaster = !!folio.paymasterId;
-        const templateName = isPaymaster ? 'paymasterFolioInvoice' : 'guestFolioInvoice';
-        
-        // Get email template
-        const emailTemplate = await EmailTemplate.findOne({
-            template_name: templateName,
-            property: propertyId
-        });
-        
-        if (!emailTemplate) {
-            return res.status(404).json({ 
-                message: `Email template "${templateName}" not found. Please add it to the database.` 
-            });
-        }
-        
         // Get recipient email
-        let recipientEmail = '';
-        if (isPaymaster) {
-            // For paymaster, we need to check if there's an email field
-            // Since paymaster doesn't have email, we'll skip sending if no email is configured
-            recipientEmail = folio.guestEmail || ''; // Fallback to guest email if available
-        } else {
-            recipientEmail = folio.guestEmail || '';
-        }
+        const recipientEmail = folio.guestEmail || '';
         
         if (!recipientEmail) {
             return res.status(400).json({ 
@@ -917,71 +1085,21 @@ router.post('/:id/send-email', async (req, res) => {
         }
         
         // Get property details
-        const propertyDetails = await PropertyDetails.findOne({ property: propertyId });
+        const propertyDetails = await PropertyDetails.findOne({ property: propertyId }).lean();
         
-        // Prepare replacements
-        const replacements = {
-            folioId: folio.folioId,
-            guestName: folio.guestName,
-            roomNumber: folio.roomNumber || '',
-            roomNumbers: folio.roomNumbers?.join(', ') || '',
-            checkIn: folio.checkIn ? new Date(folio.checkIn).toLocaleDateString('en-GB') : '',
-            checkOut: folio.checkOut ? new Date(folio.checkOut).toLocaleDateString('en-GB') : '',
-            totalCharges: folio.totalCharges?.toLocaleString('en-IN') || '0',
-            totalPayments: folio.totalPayments?.toLocaleString('en-IN') || '0',
-            balance: folio.balance?.toLocaleString('en-IN') || '0',
-            propertyName: propertyDetails?.name || 'Hotel',
-            propertyEmail: propertyDetails?.email || '',
-            propertyPhone: propertyDetails?.phone || '',
-            propertyAddress: propertyDetails?.address || '',
-            gstin: propertyDetails?.gstin || ''
-        };
+        // Determine if this is a paymaster folio
+        const isPaymaster = !!folio.paymasterId;
         
-        // Add paymaster-specific fields if applicable
-        if (isPaymaster && folio.paymasterId) {
-            replacements.paymasterCode = folio.paymasterId.paymasterCode || '';
-            replacements.paymasterName = folio.paymasterId.name || folio.guestName;
-            replacements.accountType = folio.paymasterId.accountType || '';
-        }
-        
-        // Build charges table HTML
-        let chargesTableHtml = '';
-        if (folio.items && folio.items.length > 0) {
-            chargesTableHtml = '<table class="charges-table"><thead><tr><th>Date</th><th>Description</th><th>Department</th><th class="amount">Amount</th></tr></thead><tbody>';
-            folio.items.forEach(item => {
-                const itemAmount = ((item.amount || 0) + (item.tax || 0) - (item.discount || 0)) * (item.quantity || 1);
-                chargesTableHtml += `<tr>
-                    <td>${item.date ? new Date(item.date).toLocaleDateString('en-GB') : ''}</td>
-                    <td>${item.description || ''}</td>
-                    <td>${item.department || 'Other'}</td>
-                    <td class="amount">₹${itemAmount.toLocaleString('en-IN')}</td>
-                </tr>`;
-            });
-            chargesTableHtml += '</tbody></table>';
-        } else {
-            chargesTableHtml = '<p style="color: #6b7280; font-style: italic;">No charges available.</p>';
-        }
-        
-        // Replace variables in email content
-        let emailContent = emailTemplate.content || '';
-        let emailSubject = emailTemplate.subject || `Folio Statement - ${folio.folioId}`;
-        
-        // Replace all variables
-        Object.keys(replacements).forEach(key => {
-            const regex = new RegExp(`{{${key}}}`, 'g');
-            emailContent = emailContent.replace(regex, replacements[key]);
-            emailSubject = emailSubject.replace(regex, replacements[key]);
-        });
-        
-        // Replace charges table placeholder
-        emailContent = emailContent.replace('{{chargesTable}}', chargesTableHtml);
+        // Generate HTML invoice
+        const htmlContent = generateInvoiceHTML(folio, propertyDetails, isPaymaster);
+        const emailSubject = `Invoice - ${folio.folioId} - ${propertyDetails?.name || 'Hotel'}`;
         
         // Send email
         const emailResult = await emailService.sendEmail(
             tenant,
             recipientEmail,
             emailSubject,
-            emailContent
+            htmlContent
         );
         
         if (!emailResult.success) {

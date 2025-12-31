@@ -30,6 +30,14 @@ const propertySchema = new mongoose.Schema(
             default: 15,
             min: 1,
         },
+        mobileApp_version: {
+            type: String,
+            default: '1.0.0',
+        },
+        mobileApp_link: {
+            type: String,
+            default: '',
+        },
     },
     { timestamps: true }
 );

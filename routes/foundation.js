@@ -31,6 +31,7 @@ router.post('/check-availability', requireModuleAccess('front-office'), async (r
         }
 
         const propertyId = getPropertyId(req);
+        const { getAvailability } = require('../services/cacheService');
         const RoomType = getModel(req, 'RoomType');
         const Reservation = getModel(req, 'Reservations');
         const InventoryBlock = getModel(req, 'InventoryBlock');
@@ -39,81 +40,95 @@ router.post('/check-availability', requireModuleAccess('front-office'), async (r
         const requestedCheckIn = dateValidation.checkIn;
         const requestedCheckOut = dateValidation.checkOut;
 
-        // --- Get Total Inventory ---
-        const roomType = await RoomType.findOne({ _id: roomTypeId, property: propertyId });
-        if (!roomType) {
-            return res.status(404).json({ message: "Room type not found." });
-        }
-        const totalInventory = roomType.totalInventory;
-
-        // --- Find Potentially Conflicting Reservations ---
-        const potentialConflicts = await Reservation.find({
-            roomType: roomTypeId,
-            property: propertyId,
-            status: { $in: ['confirmed', 'checked-in'] },
-            checkInDate: { $lt: requestedCheckOut },
-            checkOutDate: { $gt: requestedCheckIn }
-        }).select('checkInDate checkOutDate numberOfRooms').lean();
-
-        // --- Get Blocked Inventory for the Date Range ---
-        const inventoryBlocks = await InventoryBlock.find({
-            roomType: roomTypeId,
-            property: propertyId,
-            date: { $gte: requestedCheckIn, $lt: requestedCheckOut }
-        }).select('date blockedInventory').lean();
-
-        // Create a map of blocked inventory by date
-        const blockedInventoryMap = {};
-        inventoryBlocks.forEach(block => {
-            const dateStr = block.date.toISOString().split('T')[0];
-            blockedInventoryMap[dateStr] = (blockedInventoryMap[dateStr] || 0) + (block.blockedInventory || 0);
-        });
-
-        // --- Calculate Availability for Each Day ---
-        let dailyAvailability = {};
-        let isOverallAvailable = true; // Still useful to know if *at least one* room is free the whole time
-        let minAvailableOnAnyDay = totalInventory;
-
-        let currentDate = new Date(requestedCheckIn);
-        while (currentDate < requestedCheckOut) {
-            const dateStr = currentDate.toISOString().split('T')[0];
-            let committedRoomsForDay = 0;
-
-            potentialConflicts.forEach(res => {
-                const resCheckIn = new Date(res.checkInDate); resCheckIn.setUTCHours(0,0,0,0);
-                const resCheckOut = new Date(res.checkOutDate); resCheckOut.setUTCHours(0,0,0,0);
-                if (resCheckIn <= currentDate && resCheckOut > currentDate) {
-                    committedRoomsForDay += res.numberOfRooms;
+        // Check cache first (availability changes frequently, but cache helps with repeated queries)
+        const cachedResult = await getAvailability(
+            propertyId,
+            roomTypeId,
+            requestedCheckIn.toISOString(),
+            requestedCheckOut.toISOString(),
+            async () => {
+                // --- Get Total Inventory (use lean for performance) ---
+                const roomType = await RoomType.findOne({ _id: roomTypeId, property: propertyId }).lean();
+                if (!roomType) {
+                    return null; // Return null to indicate not found
                 }
-            });
+                const totalInventory = roomType.totalInventory;
 
-            // Get blocked inventory for this date
-            const blockedForDay = blockedInventoryMap[dateStr] || 0;
+                // --- Find Potentially Conflicting Reservations (optimized query) ---
+                const potentialConflicts = await Reservation.find({
+                    roomType: roomTypeId,
+                    property: propertyId,
+                    status: { $in: ['confirmed', 'checked-in'] },
+                    checkInDate: { $lt: requestedCheckOut },
+                    checkOutDate: { $gt: requestedCheckIn }
+                }).select('checkInDate checkOutDate numberOfRooms').lean();
 
-            // Calculate available: total - booked - blocked
-            const availableCount = totalInventory - committedRoomsForDay - blockedForDay;
-            const finalAvailableCount = Math.max(0, availableCount);
-            dailyAvailability[dateStr] = finalAvailableCount;
+                // --- Get Blocked Inventory for the Date Range (optimized query) ---
+                const inventoryBlocks = await InventoryBlock.find({
+                    roomType: roomTypeId,
+                    property: propertyId,
+                    date: { $gte: requestedCheckIn, $lt: requestedCheckOut }
+                }).select('date blockedInventory').lean();
 
-            // Update overall flag based on whether *at least one* room is available
-            if (finalAvailableCount <= 0) {
-                isOverallAvailable = false;
+                // Create a map of blocked inventory by date
+                const blockedInventoryMap = {};
+                inventoryBlocks.forEach(block => {
+                    const dateStr = block.date.toISOString().split('T')[0];
+                    blockedInventoryMap[dateStr] = (blockedInventoryMap[dateStr] || 0) + (block.blockedInventory || 0);
+                });
+
+                // --- Calculate Availability for Each Day ---
+                let dailyAvailability = {};
+                let isOverallAvailable = true; // Still useful to know if *at least one* room is free the whole time
+                let minAvailableOnAnyDay = totalInventory;
+
+                let currentDate = new Date(requestedCheckIn);
+                while (currentDate < requestedCheckOut) {
+                    const dateStr = currentDate.toISOString().split('T')[0];
+                    let committedRoomsForDay = 0;
+
+                    potentialConflicts.forEach(res => {
+                        const resCheckIn = new Date(res.checkInDate); resCheckIn.setUTCHours(0,0,0,0);
+                        const resCheckOut = new Date(res.checkOutDate); resCheckOut.setUTCHours(0,0,0,0);
+                        if (resCheckIn <= currentDate && resCheckOut > currentDate) {
+                            committedRoomsForDay += res.numberOfRooms;
+                        }
+                    });
+
+                    // Get blocked inventory for this date
+                    const blockedForDay = blockedInventoryMap[dateStr] || 0;
+
+                    // Calculate available: total - booked - blocked
+                    const availableCount = totalInventory - committedRoomsForDay - blockedForDay;
+                    const finalAvailableCount = Math.max(0, availableCount);
+                    dailyAvailability[dateStr] = finalAvailableCount;
+
+                    // Update overall flag based on whether *at least one* room is available
+                    if (finalAvailableCount <= 0) {
+                        isOverallAvailable = false;
+                    }
+
+                    minAvailableOnAnyDay = Math.min(minAvailableOnAnyDay, finalAvailableCount);
+
+                    currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+                }
+
+                // Return result for caching
+                return {
+                    overallAvailable: isOverallAvailable,
+                    minAvailableCount: minAvailableOnAnyDay,
+                    dailyAvailability: dailyAvailability
+                };
             }
+        );
 
-            minAvailableOnAnyDay = Math.min(minAvailableOnAnyDay, finalAvailableCount);
-
-            currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+        // Check if room type was found
+        if (cachedResult === null) {
+            return res.status(404).json({ message: "Room type not found." });
         }
 
         // --- Respond with Detailed Availability (raw counts) ---
-        res.status(200).json({
-            // overallAvailable: true ONLY if at least one room is free on ALL requested nights
-            overallAvailable: isOverallAvailable,
-            // minAvailableCount: The lowest number of rooms free on any single night in the range
-            minAvailableCount: minAvailableOnAnyDay,
-            // dailyAvailability: Breakdown per night showing absolute available count
-            dailyAvailability: dailyAvailability
-        });
+        res.status(200).json(cachedResult);
 
     } catch (error) {
         console.error("Detailed Availability Check Error:", error);
@@ -163,10 +178,18 @@ router.put('/Rooms/:id', requireModuleAccess('settings'), async (req, res) => {
 
 router.get('/getRooms', async (req, res) => {
     try{
+        const propertyId = getPropertyId(req);
+        const { getRooms: getCachedRooms } = require('../services/cacheService');
         const Rooms = getModel(req, 'Rooms');
-        const rooms = await Rooms.find({ property: getPropertyId(req) });
+        
+        // Use cache with fallback
+        const rooms = await getCachedRooms(propertyId, async () => {
+            return await Rooms.find({ property: propertyId }).lean();
+        });
+        
         res.status(200).json(rooms);
     }catch(error){
+        console.error('Error fetching rooms:', error);
         res.status(500).json({message: "Server error fetching rooms."})
     }
 });
@@ -252,11 +275,12 @@ router.post('/addRoomType', requireModuleAccess('settings'), async (req,res) => 
         const propertyId = getPropertyId(req);
         const property = req.tenant.property;
         const allowedRooms = property.allowedrooms || 15;
+        const { invalidateRoomTypes } = require('../services/cacheService');
         
         const RoomType = getModel(req, 'RoomType');
         
-        // Check total inventory limit
-        const existingRoomTypes = await RoomType.find({ property: propertyId });
+        // Check total inventory limit (use lean for performance)
+        const existingRoomTypes = await RoomType.find({ property: propertyId }).lean();
         const currentTotalInventory = existingRoomTypes.reduce((sum, rt) => sum + rt.totalInventory, 0);
         const newInventory = req.body.totalInventory || 0;
         const newTotalInventory = currentTotalInventory + newInventory;
@@ -272,7 +296,11 @@ router.post('/addRoomType', requireModuleAccess('settings'), async (req,res) => 
             property: propertyId,
         };
         const newRoomType = new RoomType(roomTypeData);
-        await newRoomType.save()
+        await newRoomType.save();
+        
+        // Invalidate cache
+        await invalidateRoomTypes(propertyId);
+        
         res.status(200).json({message:"Successfully added new room type", newRoomType})
     }catch(error){
         console.error('Error adding room type:', error);
@@ -286,18 +314,19 @@ router.put('/roomType/:id', requireModuleAccess('settings'), async (req, res) =>
         const propertyId = getPropertyId(req);
         const property = req.tenant.property;
         const allowedRooms = property.allowedrooms || 15;
+        const { invalidateRoomTypes } = require('../services/cacheService');
         
         const RoomType = getModel(req, 'RoomType');
         
-        // Check if room type exists
-        const existingRoomType = await RoomType.findOne({ _id: id, property: propertyId });
+        // Check if room type exists (use lean for performance)
+        const existingRoomType = await RoomType.findOne({ _id: id, property: propertyId }).lean();
         if (!existingRoomType) {
             return res.status(404).json({ message: "Room type not found." });
         }
         
         // Check total inventory limit if totalInventory is being updated
         if (req.body.totalInventory !== undefined) {
-            const existingRoomTypes = await RoomType.find({ property: propertyId });
+            const existingRoomTypes = await RoomType.find({ property: propertyId }).lean();
             const currentTotalInventory = existingRoomTypes.reduce((sum, rt) => {
                 // Exclude the room type being updated from the sum
                 if (rt._id.toString() === id) {
@@ -324,6 +353,9 @@ router.put('/roomType/:id', requireModuleAccess('settings'), async (req, res) =>
             { new: true, runValidators: true }
         );
 
+        // Invalidate cache
+        await invalidateRoomTypes(propertyId);
+
         res.status(200).json({
             message: "Room type updated successfully.",
             roomType: updatedRoomType
@@ -337,15 +369,21 @@ router.put('/roomType/:id', requireModuleAccess('settings'), async (req, res) =>
 router.delete('/roomType/:id', requireModuleAccess('settings'), async (req, res) => {
     try {
         const { id } = req.params;
+        const propertyId = getPropertyId(req);
+        const { invalidateRoomTypes } = require('../services/cacheService');
         const RoomType = getModel(req, 'RoomType');
+        
         const deletedRoomType = await RoomType.findOneAndDelete({
             _id: id,
-            property: getPropertyId(req)
+            property: propertyId
         });
 
         if (!deletedRoomType) {
             return res.status(404).json({ message: "Room type not found." });
         }
+
+        // Invalidate cache
+        await invalidateRoomTypes(propertyId);
 
         res.status(200).json({
             message: "Room type deleted successfully.",
@@ -359,10 +397,18 @@ router.delete('/roomType/:id', requireModuleAccess('settings'), async (req, res)
 
 router.get('/getRoomTypes', async (req, res) => {
     try{
+        const propertyId = getPropertyId(req);
+        const { getRoomTypes: getCachedRoomTypes } = require('../services/cacheService');
         const RoomType = getModel(req, 'RoomType');
-        const roomTypes = await RoomType.find({ property: getPropertyId(req) });
+        
+        // Use cache with fallback
+        const roomTypes = await getCachedRoomTypes(propertyId, async () => {
+            return await RoomType.find({ property: propertyId }).lean();
+        });
+        
         res.status(200).json(roomTypes);
     }catch(error){
+        console.error('Error fetching room types:', error);
         res.status(500).json({message: "Server error fetching room types."})
     }
 });

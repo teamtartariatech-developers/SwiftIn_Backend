@@ -4,6 +4,8 @@ const jwt = require('jsonwebtoken');
 const { ROLE_MODULES, MODULE_OPTIONS, ROLE_OPTIONS } = require('../../db/auth/user');
 const { getTenantContext, sanitizeCode } = require('../../services/tenantManager');
 const { authenticate, requireRole, requireModuleAccess } = require('../../middleware/auth');
+const { loginRateLimit, trackFailedAuth, getClientIP } = require('../../middleware/ipSecurity');
+const { cacheSet, cacheDel } = require('../../services/redisClient');
 
 const router = express.Router();
 router.use(bodyParser.json());
@@ -41,6 +43,37 @@ router.post('/properties', (_req, res) => {
     res.status(501).json({
         message: 'Use the admin CLI (npm run admin:create-property) to provision new properties.',
     });
+});
+
+// Public endpoint to get mobile app version info (no auth required)
+router.get('/mobile-app-version', async (req, res) => {
+    try {
+        const Property = require('../../db/auth/properties');
+        // Get the first active property (assuming all properties share the same app version)
+        // Or you can modify this to get a specific property by code if needed
+        const property = await Property.findOne({ status: 'Active' })
+            .select('mobileApp_version mobileApp_link')
+            .lean();
+        
+        if (!property) {
+            return res.status(200).json({
+                mobileApp_version: '1.0.0',
+                mobileApp_link: '',
+            });
+        }
+        
+        res.status(200).json({
+            mobileApp_version: property.mobileApp_version || '1.0.0',
+            mobileApp_link: property.mobileApp_link || '',
+        });
+    } catch (error) {
+        console.error('Error fetching mobile app version:', error);
+        res.status(500).json({
+            message: 'Server error fetching mobile app version.',
+            mobileApp_version: '1.0.0',
+            mobileApp_link: '',
+        });
+    }
 });
 
 // Create a new user for the current property (Admin/Manager only)
@@ -239,9 +272,10 @@ router.delete(
     }
 );
 
-router.post('/login', async (req, res) => {
+router.post('/login', loginRateLimit, async (req, res) => {
     try {
         const { email, password, propertyCode } = req.body;
+        const ip = getClientIP(req);
 
         if (!email || !password) {
             return res.status(400).json({ message: 'Email and password are required.' });
@@ -257,6 +291,7 @@ router.post('/login', async (req, res) => {
             tenant = await getTenantContext(normalizedCode);
         } catch (error) {
             if (error.message === 'TENANT_PROPERTY_NOT_FOUND') {
+                await trackFailedAuth(ip, '/api/auth/login');
                 return res.status(404).json({ message: 'Property not found or inactive.' });
             }
             console.error('Error resolving tenant:', error);
@@ -264,33 +299,49 @@ router.post('/login', async (req, res) => {
         }
 
         const UserModel = tenant.models.User;
-        const user = await UserModel.findOne({ email: email.toLowerCase(), property: tenant.property._id });
+        // Use lean() for faster query - we only need to check password
+        const user = await UserModel.findOne({ 
+            email: email.toLowerCase(), 
+            property: tenant.property._id 
+        }).lean();
 
         if (!user) {
+            await trackFailedAuth(ip, '/api/auth/login');
             return res.status(401).json({ message: 'Invalid email or password.' });
         }
 
-        const isMatch = await user.comparePassword(password);
+        // Need to get full user document to use comparePassword method
+        const fullUser = await UserModel.findById(user._id);
+        const isMatch = await fullUser.comparePassword(password);
+        
         if (!isMatch) {
+            await trackFailedAuth(ip, '/api/auth/login');
             return res.status(401).json({ message: 'Invalid email or password.' });
         }
 
-        if (user.status !== 'Active') {
+        if (fullUser.status !== 'Active') {
+            await trackFailedAuth(ip, '/api/auth/login');
             return res.status(403).json({ message: 'User account is inactive.' });
         }
 
-        user.lastLogin = new Date();
-        await user.save();
+        // Update last login
+        fullUser.lastLogin = new Date();
+        await fullUser.save();
 
-        const token = signToken(user, tenant.property);
+        // Invalidate any existing user cache
+        await cacheDel(`user:${fullUser._id}:${normalizedCode}`);
+
+        const token = signToken(fullUser, tenant.property);
 
         res.status(200).json({
             message: 'Login successful',
             token,
-            user: serializeUser(user, tenant.property),
+            user: serializeUser(fullUser, tenant.property),
         });
     } catch (error) {
         console.error('Error in login:', error);
+        const ip = getClientIP(req);
+        await trackFailedAuth(ip, '/api/auth/login');
         res.status(500).json({ message: 'Server error during login.' });
     }
 });

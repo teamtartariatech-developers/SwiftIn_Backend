@@ -51,6 +51,7 @@ router.get('/', async (req, res) => {
         // Get paginated results
         const reviews = await Review.find(filterQuery)
             .skip(skip)
+            .lean() // Use lean() for better performance
             .limit(limit)
             .sort({ date: -1 }); // Sort by newest first
         

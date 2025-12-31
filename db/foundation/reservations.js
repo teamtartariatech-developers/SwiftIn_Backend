@@ -30,6 +30,11 @@ const reservations = new mongoose.Schema({
     mealPlanRate: { type: Number, default: 0 },
     mealPlanGuestCount: { type: Number, default: 0 },
     mealPlanNights: { type: Number, default: 0 },
+    mealPreferences: {
+        veg: { type: Number, default: 0 },
+        nonVeg: { type: Number, default: 0 },
+        jain: { type: Number, default: 0 }
+    },
     paymentMethod: String,
     Source: String,
     adhaarNumber: String,

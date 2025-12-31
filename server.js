@@ -1,8 +1,10 @@
 const express = require('express');
 const http = require('http');
+const compression = require('compression');
 const app = express();
 const dotenv = require('dotenv');
 const connectDB = require('./db/dbcon');
+const { connectRedis } = require('./services/redisClient');
 const test = require('./routes/test');
 const reservations = require('./routes/frontOffice/reservations');
 const foundation = require('./routes/foundation');
@@ -26,7 +28,60 @@ const paymaster = require('./routes/paymaster/paymaster');
 const groupReservation = require('./routes/groupReservation/groupReservation');
 const { initWebsockets } = require('./services/websocketManager');
 
-app.use(express.json());
+// Security and Performance Middleware
+const {
+    securityHeaders,
+    requestSizeLimit,
+    sanitizeBody,
+    performanceMonitor,
+    requestTimeout,
+    contentTypeValidation,
+} = require('./middleware/security');
+const { ipSecurity } = require('./middleware/ipSecurity');
+
+dotenv.config();
+
+// Initialize Redis connection
+connectRedis().catch(err => {
+    console.warn('⚠️ Redis connection failed, continuing without cache:', err.message);
+});
+
+// Apply security headers first
+app.use(securityHeaders);
+
+// Compression for faster responses
+app.use(compression({
+    level: 6, // Balance between compression and CPU
+    threshold: 1024, // Only compress responses > 1KB
+    filter: (req, res) => {
+        if (req.headers['x-no-compression']) {
+            return false;
+        }
+        return compression.filter(req, res);
+    }
+}));
+
+// Request timeout (30 seconds)
+app.use(requestTimeout(30000));
+
+// Request size limit
+app.use(requestSizeLimit);
+
+// Content type validation
+app.use(contentTypeValidation);
+
+// Performance monitoring
+app.use(performanceMonitor);
+
+// IP-based security (must be early in the chain)
+app.use(ipSecurity);
+
+// Body parsing with size limits
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Input sanitization
+app.use(sanitizeBody);
 
 // Enable CORS for specific origins only
 const allowedOrigins = [
@@ -47,6 +102,12 @@ const isOriginAllowed = (origin) => {
     // Allow localhost with any port
     const localhostRegex = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
     if (localhostRegex.test(origin)) {
+        return true;
+    }
+    
+    // Allow LAN IP addresses (192.168.x.x, 10.x.x.x, 172.16-31.x.x)
+    const lanIpRegex = /^https?:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)(:\d+)?$/;
+    if (lanIpRegex.test(origin)) {
         return true;
     }
     
@@ -120,16 +181,52 @@ app.use('/api/group-reservation', groupReservation);
 
 const server = http.createServer(app);
 
-// Connect to MongoDB first, then initialize WebSockets
-connectDB().then(() => {
-    console.log('MongoDB connected, initializing WebSockets...');
-    initWebsockets(server);
-    
-    const port = process.env.Port || 3000;
-    server.listen(port, () => { 
-        console.log(`Server is listening on port ${port}`);
-    });
-}).catch((error) => {
-    console.error('Failed to connect to MongoDB:', error);
-    process.exit(1);
-});
+// Connect to MongoDB and Redis, then initialize WebSockets
+async function startServer() {
+    try {
+        // Connect to MongoDB
+        await connectDB();
+        console.log('✅ MongoDB connected');
+        
+        // Connect to Redis (non-blocking - app continues if Redis fails)
+        await connectRedis();
+        
+        // Initialize WebSockets
+        console.log('🔄 Initializing WebSockets...');
+        initWebsockets(server);
+        
+        const port = process.env.Port || 3000;
+        const os = require('os');
+        
+        // Get LAN IP address
+        const getLocalIP = () => {
+            const interfaces = os.networkInterfaces();
+            for (const name of Object.keys(interfaces)) {
+                for (const iface of interfaces[name]) {
+                    // Skip internal (loopback) and non-IPv4 addresses
+                    if (iface.family === 'IPv4' && !iface.internal) {
+                        return iface.address;
+                    }
+                }
+            }
+            return 'localhost';
+        };
+        
+        const lanIP = getLocalIP();
+        
+        // Listen on all network interfaces (0.0.0.0) to allow LAN access
+        server.listen(port, '0.0.0.0', () => { 
+            console.log(`🚀 Server is listening on port ${port}`);
+            console.log(`🌐 Local:    http://localhost:${port}`);
+            console.log(`🌐 Network:  http://${lanIP}:${port}`);
+            console.log(`⚡ Performance optimizations: ENABLED`);
+            console.log(`🔒 Security enhancements: ENABLED`);
+            console.log(`💾 Redis caching: ${require('./services/redisClient').isConnected() ? 'ENABLED' : 'DISABLED'}`);
+        });
+    } catch (error) {
+        console.error('❌ Failed to start server:', error);
+        process.exit(1);
+    }
+}
+
+startServer();
