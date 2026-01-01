@@ -1392,4 +1392,245 @@ router.delete('/:id/notes/:noteId', async (req, res) => {
     }
 });
 
+// Shift reservation to different room/room type
+router.post('/:id/shift', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { roomNumbers, roomTypeId } = req.body;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid reservation ID format' });
+        }
+        
+        if (!roomNumbers || !Array.isArray(roomNumbers) || roomNumbers.length === 0) {
+            return res.status(400).json({ message: 'roomNumbers array is required and must not be empty' });
+        }
+        
+        // Validate all room IDs
+        for (const roomId of roomNumbers) {
+            if (!isValidObjectId(roomId)) {
+                return res.status(400).json({ message: `Invalid room ID format: ${roomId}` });
+            }
+        }
+        
+        if (roomTypeId && !isValidObjectId(roomTypeId)) {
+            return res.status(400).json({ message: 'Invalid roomTypeId format' });
+        }
+        
+        const propertyId = getPropertyId(req);
+        const Reservations = getModel(req, 'Reservations');
+        const Rooms = getModel(req, 'Rooms');
+        const RoomType = getModel(req, 'RoomType');
+        const GuestFolio = getModel(req, 'GuestFolio');
+        
+        // Get reservation
+        const reservation = await Reservations.findOne({
+            _id: id,
+            property: propertyId,
+        });
+        
+        if (!reservation) {
+            return res.status(404).json({ message: 'Reservation not found.' });
+        }
+        
+        // Check if reservation is checked-in
+        if (reservation.status !== 'checked-in') {
+            return res.status(400).json({ message: 'Can only shift checked-in reservations.' });
+        }
+        
+        // Get folio
+        const folio = await GuestFolio.findOne({
+            reservationId: reservation._id,
+            property: propertyId,
+            status: 'active'
+        });
+        
+        if (!folio) {
+            return res.status(404).json({ message: 'Active folio not found for this reservation.' });
+        }
+        
+        // Validate new rooms exist and are clean
+        const newRooms = await Rooms.find({
+            _id: { $in: roomNumbers },
+            property: propertyId
+        });
+        
+        if (newRooms.length !== roomNumbers.length) {
+            return res.status(400).json({ message: 'One or more rooms not found.' });
+        }
+        
+        // Check if all new rooms are clean
+        const dirtyRooms = newRooms.filter(room => room.status !== 'clean');
+        if (dirtyRooms.length > 0) {
+            const dirtyRoomNumbers = dirtyRooms.map(r => r.roomNumber).join(', ');
+            return res.status(400).json({ message: `The following rooms are not clean: ${dirtyRoomNumbers}` });
+        }
+        
+        // Get new room type (if provided, otherwise use existing)
+        const currentRoomTypeId = reservation.roomType.toString();
+        const newRoomTypeId = roomTypeId || currentRoomTypeId;
+        const newRoomType = await RoomType.findOne({
+            _id: newRoomTypeId,
+            property: propertyId
+        });
+        
+        if (!newRoomType) {
+            return res.status(404).json({ message: 'New room type not found.' });
+        }
+        
+        const isRoomTypeChanged = roomTypeId && newRoomTypeId !== currentRoomTypeId;
+        
+        // Get old rooms to update their status
+        const oldRoomIds = reservation.roomNumbers || [];
+        const oldRooms = oldRoomIds.length > 0 ? await Rooms.find({
+            _id: { $in: oldRoomIds },
+            property: propertyId
+        }) : [];
+        
+        // Calculate time stayed in previous room
+        const checkInDate = new Date(reservation.checkInDate);
+        const now = new Date();
+        const shiftTime = now;
+        
+        // Calculate full days stayed (11 AM cutoff logic)
+        // Night ends at 11 AM next day, so if shift is before 11 AM, don't count last night as full
+        const nextDay11AM = new Date(checkInDate);
+        nextDay11AM.setDate(nextDay11AM.getDate() + 1);
+        nextDay11AM.setHours(11, 0, 0, 0);
+        
+        let fullNightsStayed = 0;
+        
+        if (shiftTime >= nextDay11AM) {
+            // If shift time is after 11 AM next day, count full nights
+            fullNightsStayed = Math.floor((shiftTime - checkInDate) / (1000 * 60 * 60 * 24));
+            // If shift time is after 11 AM on a day, add that night
+            const shiftDay11AM = new Date(shiftTime);
+            shiftDay11AM.setHours(11, 0, 0, 0);
+            if (shiftTime >= shiftDay11AM) {
+                fullNightsStayed = Math.max(1, fullNightsStayed);
+            }
+        }
+        // If less than 11 AM next day, fullNightsStayed remains 0
+        
+        // Get old room type for pricing
+        const oldRoomType = await RoomType.findOne({
+            _id: reservation.roomType,
+            property: propertyId
+        });
+        
+        // Calculate charges for previous room if stayed >= 1 full night
+        if (fullNightsStayed >= 1 && oldRoomType && oldRooms.length > 0) {
+            const oldRoomNumbers = oldRooms.map(r => r.roomNumber);
+            const oldRoomTypeName = oldRoomType.name || 'Room';
+            const priceModel = oldRoomType.priceModel || 'perRoom';
+            
+            // Calculate charge per room per night
+            let chargePerRoomPerNight = 0;
+            if (priceModel === 'perRoom') {
+                chargePerRoomPerNight = oldRoomType.baseRate || 0;
+            } else if (priceModel === 'perPerson') {
+                const adultCount = reservation.adultCount || reservation.numberOfAdults || 0;
+                const childCount = reservation.childCount || reservation.numberOfChildren || 0;
+                const adultRate = oldRoomType.adultRate || 0;
+                const childRate = oldRoomType.childRate || 0;
+                chargePerRoomPerNight = (adultCount * adultRate) + (childCount * childRate);
+            }
+            
+            // Add charges for each old room for each full night
+            oldRoomNumbers.forEach(roomNum => {
+                const chargePerRoom = chargePerRoomPerNight * fullNightsStayed;
+                
+                folio.items.push({
+                    description: `Accommodation - ${oldRoomTypeName} (Room ${roomNum}) - ${fullNightsStayed} night${fullNightsStayed > 1 ? 's' : ''}`,
+                    date: checkInDate,
+                    amount: chargePerRoom,
+                    department: 'Room',
+                    quantity: 1,
+                    unitPrice: chargePerRoom,
+                    tax: 0,
+                    discount: 0
+                });
+            });
+        }
+        
+        // Update reservation with new rooms and room type
+        reservation.roomNumbers = roomNumbers;
+        if (isRoomTypeChanged) {
+            reservation.roomType = newRoomTypeId;
+        }
+        await reservation.save();
+        
+        // Get new room numbers
+        const newRoomNumbers = newRooms.map(r => r.roomNumber);
+        
+        // Update folio with new room numbers
+        folio.roomNumbers = newRoomNumbers;
+        folio.roomNumber = newRoomNumbers[0] || '';
+        
+        // Calculate remaining nights from shift time to checkout
+        const checkOutDate = new Date(reservation.checkOutDate);
+        const remainingNights = Math.max(0, Math.ceil((checkOutDate - shiftTime) / (1000 * 60 * 60 * 24)));
+        
+        if (remainingNights > 0) {
+            // Calculate charge for new room type
+            const newPriceModel = newRoomType.priceModel || 'perRoom';
+            let chargePerRoomPerNight = 0;
+            
+            if (newPriceModel === 'perRoom') {
+                chargePerRoomPerNight = newRoomType.baseRate || 0;
+            } else if (newPriceModel === 'perPerson') {
+                const adultCount = reservation.adultCount || reservation.numberOfAdults || 0;
+                const childCount = reservation.childCount || reservation.numberOfChildren || 0;
+                const adultRate = newRoomType.adultRate || 0;
+                const childRate = newRoomType.childRate || 0;
+                chargePerRoomPerNight = (adultCount * adultRate) + (childCount * childRate);
+            }
+            
+            // Add charges for new rooms for remaining nights
+            newRoomNumbers.forEach(roomNum => {
+                const chargePerRoom = chargePerRoomPerNight * remainingNights;
+                folio.items.push({
+                    description: `Accommodation - ${newRoomType.name} (Room ${roomNum}) - ${remainingNights} night${remainingNights > 1 ? 's' : ''}`,
+                    date: shiftTime,
+                    amount: chargePerRoom,
+                    department: 'Room',
+                    quantity: 1,
+                    unitPrice: chargePerRoom,
+                    tax: 0,
+                    discount: 0
+                });
+            });
+        }
+        
+        // Recalculate folio balance
+        folio.calculateBalance();
+        await folio.save();
+        
+        // Update room statuses
+        // Mark old rooms as dirty
+        for (const oldRoom of oldRooms) {
+            oldRoom.status = 'dirty';
+            await oldRoom.save();
+        }
+        
+        // Mark new rooms as occupied
+        for (const newRoom of newRooms) {
+            newRoom.status = 'occupied';
+            await newRoom.save();
+        }
+        
+        res.status(200).json({
+            message: 'Reservation shifted successfully.',
+            reservation: reservation,
+            folio: folio,
+            fullNightsStayed: fullNightsStayed,
+            remainingNights: remainingNights
+        });
+    } catch (error) {
+        console.error('Error shifting reservation:', error);
+        res.status(500).json({ message: 'Server error shifting reservation.' });
+    }
+});
+
 module.exports = router;
