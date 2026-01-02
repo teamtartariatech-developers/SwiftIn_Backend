@@ -3,6 +3,7 @@ const bodyParser = require('body-parser');
 const { authenticate, requireModuleAccess } = require('../../middleware/auth');
 const { broadcastHousekeepingMessage } = require('../../services/websocketManager');
 const { validateAndSetDefaults, isValidObjectId } = require('../../utils/validation');
+const { sendNotificationToPropertyUsers } = require('../../services/pushNotificationService');
 
 const router = express.Router();
 
@@ -282,6 +283,38 @@ router.post('/messages', async (req, res) => {
       ...payload,
       property: propertyId.toString(),
     });
+
+    // Send push notifications to all users in the property (except the sender)
+    try {
+      const Users = req.tenant.models.User;
+      const notificationResult = await sendNotificationToPropertyUsers(
+        Users,
+        propertyId,
+        'New Housekeeping Message',
+        `${req.user.name}: ${text.trim().substring(0, 100)}${text.trim().length > 100 ? '...' : ''}`,
+        {
+          type: 'housekeeping-message',
+          messageId: doc._id.toString(),
+          propertyId: propertyId.toString(),
+        },
+        req.user.id // Exclude the sender
+      );
+
+      if (!notificationResult.success && notificationResult.error && notificationResult.error !== 'No users with FCM tokens found') {
+        console.error('Error sending push notifications:', notificationResult.error);
+      }
+
+      // Clean up invalid tokens if any
+      if (notificationResult.invalidTokens && notificationResult.invalidTokens.length > 0) {
+        await Users.updateMany(
+          { fcmToken: { $in: notificationResult.invalidTokens } },
+          { $unset: { fcmToken: '' } }
+        );
+      }
+    } catch (notificationError) {
+      // Log error but don't fail the message creation
+      console.error('Error sending push notifications for housekeeping message:', notificationError);
+    }
 
     res.status(201).json(payload);
   } catch (error) {

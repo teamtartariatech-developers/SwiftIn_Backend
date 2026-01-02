@@ -27,6 +27,7 @@ const travelAgent = require('./routes/travelAgent/travelAgent');
 const paymaster = require('./routes/paymaster/paymaster');
 const groupReservation = require('./routes/groupReservation/groupReservation');
 const { initWebsockets } = require('./services/websocketManager');
+const { initializeFirebase } = require('./services/pushNotificationService');
 
 // Security and Performance Middleware
 const {
@@ -194,6 +195,10 @@ async function startServer() {
         // Initialize WebSockets
         console.log('🔄 Initializing WebSockets...');
         initWebsockets(server);
+        
+        // Initialize Firebase Admin SDK for push notifications
+        console.log('🔄 Initializing Firebase Admin SDK...');
+        initializeFirebase();
         
         const port = process.env.Port || 3000;
         const os = require('os');

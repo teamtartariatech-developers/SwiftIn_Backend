@@ -359,4 +359,33 @@ router.get('/verify', authenticate, async (req, res) => {
     }
 });
 
+// Register/Update FCM token for push notifications
+router.post('/fcm-token', authenticate, async (req, res) => {
+    try {
+        const { fcmToken } = req.body;
+        const { user, models } = req.tenant;
+        
+        if (!fcmToken || typeof fcmToken !== 'string' || fcmToken.trim().length === 0) {
+            return res.status(400).json({ message: 'FCM token is required.' });
+        }
+
+        const UserModel = models.User;
+        const userDoc = await UserModel.findById(user.id);
+        
+        if (!userDoc) {
+            return res.status(404).json({ message: 'User not found.' });
+        }
+
+        userDoc.fcmToken = fcmToken.trim();
+        await userDoc.save();
+
+        res.status(200).json({
+            message: 'FCM token registered successfully.',
+        });
+    } catch (error) {
+        console.error('Error registering FCM token:', error);
+        res.status(500).json({ message: 'Server error registering FCM token.' });
+    }
+});
+
 module.exports = router;

@@ -60,6 +60,11 @@ const userSchema = new mongoose.Schema(
             default: 'Active',
         },
         lastLogin: Date,
+        fcmToken: {
+            type: String,
+            default: null,
+            index: true,
+        },
     },
     { timestamps: true }
 );
