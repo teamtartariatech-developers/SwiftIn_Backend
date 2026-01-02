@@ -881,6 +881,7 @@ router.get('/departures/:date', async (req, res) => {
                 .skip(skip)
                 .limit(parseInt(limit, 10))
                 .sort({ checkOutDate: 1, guestName: 1 })
+                .populate('roomNumbers', 'roomNumber')
                 .lean(), // Use lean() for better performance
         ]);
 
