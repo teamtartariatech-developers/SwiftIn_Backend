@@ -1396,5 +1396,417 @@ router.post('/bills/:id/generate-pdf', async (req, res) => {
     }
 });
 
+// Update a charge in folio
+router.put('/:id/charges/:chargeId', async (req, res) => {
+    try {
+        const { id, chargeId } = req.params;
+        
+        // Validate ObjectIds
+        if (!isValidObjectId(id) || !isValidObjectId(chargeId)) {
+            return res.status(400).json({ message: 'Invalid ID format' });
+        }
+        
+        // Validate charge fields
+        const chargeSchema = {
+            description: { type: 'string' },
+            date: { type: 'string', isDate: true },
+            amount: { type: 'number', min: 0 },
+            department: { type: 'string' },
+            quantity: { type: 'number', min: 1 },
+            unitPrice: { type: 'number', min: 0 },
+            tax: { type: 'number', min: 0 },
+            discount: { type: 'number', min: 0 },
+            notes: { type: 'string' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, chargeSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const folio = await GuestFolio.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+        if (!folio) {
+            return res.status(404).json({ message: "Folio not found." });
+        }
+        
+        // Find the charge item
+        const chargeIndex = folio.items.findIndex(item => item._id.toString() === chargeId);
+        if (chargeIndex === -1) {
+            return res.status(404).json({ message: "Charge not found." });
+        }
+        
+        // Check if it's a room charge (don't allow editing)
+        const charge = folio.items[chargeIndex];
+        if (charge.department === 'Room' && charge.description.toLowerCase().includes('accommodation')) {
+            return res.status(400).json({ message: "Room accommodation charges cannot be edited." });
+        }
+        
+        // Update the charge
+        const updates = validation.validated;
+        if (updates.date) {
+            folio.items[chargeIndex].date = new Date(updates.date);
+        }
+        if (updates.description !== undefined) folio.items[chargeIndex].description = updates.description;
+        if (updates.amount !== undefined) folio.items[chargeIndex].amount = updates.amount;
+        if (updates.department !== undefined) folio.items[chargeIndex].department = updates.department;
+        if (updates.quantity !== undefined) folio.items[chargeIndex].quantity = updates.quantity;
+        if (updates.unitPrice !== undefined) folio.items[chargeIndex].unitPrice = updates.unitPrice;
+        if (updates.tax !== undefined) folio.items[chargeIndex].tax = updates.tax;
+        if (updates.discount !== undefined) folio.items[chargeIndex].discount = updates.discount;
+        if (updates.notes !== undefined) folio.items[chargeIndex].notes = updates.notes;
+        
+        // Set unitPrice to amount if not provided
+        if (!folio.items[chargeIndex].unitPrice) {
+            folio.items[chargeIndex].unitPrice = folio.items[chargeIndex].amount;
+        }
+        
+        folio.calculateBalance();
+        await folio.save();
+        
+        // Update paymaster if applicable
+        if (folio.paymasterId) {
+            try {
+                const PaymasterRoom = getModel(req, 'PaymasterRoom');
+                const paymaster = await PaymasterRoom.findOne({
+                    _id: folio.paymasterId,
+                    property: getPropertyId(req)
+                });
+                if (paymaster) {
+                    paymaster.charges = folio.items.map(item => ({
+                        description: item.description,
+                        date: item.date,
+                        amount: item.amount,
+                        department: item.department,
+                        quantity: item.quantity,
+                        unitPrice: item.unitPrice,
+                        tax: item.tax,
+                        discount: item.discount,
+                        notes: item.notes
+                    }));
+                    paymaster.calculateBalance();
+                    await paymaster.save();
+                }
+            } catch (paymasterError) {
+                console.error('Error updating paymaster:', paymasterError);
+            }
+        }
+        
+        res.status(200).json(folio);
+    } catch (error) {
+        console.error('Error updating charge:', error);
+        res.status(500).json({ message: "Server error updating charge." });
+    }
+});
+
+// Delete a charge from folio
+router.delete('/:id/charges/:chargeId', async (req, res) => {
+    try {
+        const { id, chargeId } = req.params;
+        
+        // Validate ObjectIds
+        if (!isValidObjectId(id) || !isValidObjectId(chargeId)) {
+            return res.status(400).json({ message: 'Invalid ID format' });
+        }
+
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const folio = await GuestFolio.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+        if (!folio) {
+            return res.status(404).json({ message: "Folio not found." });
+        }
+        
+        // Find the charge item
+        const chargeIndex = folio.items.findIndex(item => item._id.toString() === chargeId);
+        if (chargeIndex === -1) {
+            return res.status(404).json({ message: "Charge not found." });
+        }
+        
+        // Check if it's a room charge (don't allow deletion)
+        const charge = folio.items[chargeIndex];
+        if (charge.department === 'Room' && charge.description.toLowerCase().includes('accommodation')) {
+            return res.status(400).json({ message: "Room accommodation charges cannot be deleted." });
+        }
+        
+        // Remove the charge
+        folio.items.splice(chargeIndex, 1);
+        
+        folio.calculateBalance();
+        await folio.save();
+        
+        // Update paymaster if applicable
+        if (folio.paymasterId) {
+            try {
+                const PaymasterRoom = getModel(req, 'PaymasterRoom');
+                const paymaster = await PaymasterRoom.findOne({
+                    _id: folio.paymasterId,
+                    property: getPropertyId(req)
+                });
+                if (paymaster) {
+                    paymaster.charges = folio.items.map(item => ({
+                        description: item.description,
+                        date: item.date,
+                        amount: item.amount,
+                        department: item.department,
+                        quantity: item.quantity,
+                        unitPrice: item.unitPrice,
+                        tax: item.tax,
+                        discount: item.discount,
+                        notes: item.notes
+                    }));
+                    paymaster.calculateBalance();
+                    await paymaster.save();
+                }
+            } catch (paymasterError) {
+                console.error('Error updating paymaster:', paymasterError);
+            }
+        }
+        
+        res.status(200).json(folio);
+    } catch (error) {
+        console.error('Error deleting charge:', error);
+        res.status(500).json({ message: "Server error deleting charge." });
+    }
+});
+
+// Update a payment in folio
+router.put('/:id/payments/:paymentId', async (req, res) => {
+    try {
+        const { id, paymentId } = req.params;
+        
+        // Validate ObjectIds
+        if (!isValidObjectId(id) || !isValidObjectId(paymentId)) {
+            return res.status(400).json({ message: 'Invalid ID format' });
+        }
+        
+        // Validate payment fields
+        const paymentSchema = {
+            date: { type: 'string', isDate: true },
+            method: { type: 'string' },
+            amount: { type: 'number', min: 0 },
+            transactionId: { type: 'string' },
+            notes: { type: 'string' }
+        };
+
+        const validation = validateAndSetDefaults(req.body, paymentSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const folio = await GuestFolio.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+        if (!folio) {
+            return res.status(404).json({ message: "Folio not found." });
+        }
+        
+        // Find the payment item
+        const paymentIndex = folio.payments.findIndex(payment => payment._id.toString() === paymentId);
+        if (paymentIndex === -1) {
+            return res.status(404).json({ message: "Payment not found." });
+        }
+        
+        // Update the payment
+        const updates = validation.validated;
+        if (updates.date) {
+            folio.payments[paymentIndex].date = new Date(updates.date);
+        }
+        if (updates.method !== undefined) {
+            folio.payments[paymentIndex].method = normalizePaymentMethod(updates.method);
+        }
+        if (updates.amount !== undefined) folio.payments[paymentIndex].amount = updates.amount;
+        if (updates.transactionId !== undefined) folio.payments[paymentIndex].transactionId = updates.transactionId;
+        if (updates.notes !== undefined) folio.payments[paymentIndex].notes = updates.notes;
+        
+        folio.calculateBalance();
+        await folio.save();
+        
+        // Update paymaster if applicable
+        if (folio.paymasterId) {
+            try {
+                const PaymasterRoom = getModel(req, 'PaymasterRoom');
+                const paymaster = await PaymasterRoom.findOne({
+                    _id: folio.paymasterId,
+                    property: getPropertyId(req)
+                });
+                if (paymaster) {
+                    paymaster.payments = folio.payments.map(payment => ({
+                        date: payment.date,
+                        method: payment.method,
+                        amount: payment.amount,
+                        transactionId: payment.transactionId,
+                        notes: payment.notes
+                    }));
+                    paymaster.calculateBalance();
+                    await paymaster.save();
+                }
+            } catch (paymasterError) {
+                console.error('Error updating paymaster:', paymasterError);
+            }
+        }
+        
+        res.status(200).json(folio);
+    } catch (error) {
+        console.error('Error updating payment:', error);
+        res.status(500).json({ message: "Server error updating payment." });
+    }
+});
+
+// Delete a payment from folio
+router.delete('/:id/payments/:paymentId', async (req, res) => {
+    try {
+        const { id, paymentId } = req.params;
+        
+        // Validate ObjectIds
+        if (!isValidObjectId(id) || !isValidObjectId(paymentId)) {
+            return res.status(400).json({ message: 'Invalid ID format' });
+        }
+
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const folio = await GuestFolio.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+        if (!folio) {
+            return res.status(404).json({ message: "Folio not found." });
+        }
+        
+        // Find the payment item
+        const paymentIndex = folio.payments.findIndex(payment => payment._id.toString() === paymentId);
+        if (paymentIndex === -1) {
+            return res.status(404).json({ message: "Payment not found." });
+        }
+        
+        // Remove the payment
+        folio.payments.splice(paymentIndex, 1);
+        
+        folio.calculateBalance();
+        await folio.save();
+        
+        // Update paymaster if applicable
+        if (folio.paymasterId) {
+            try {
+                const PaymasterRoom = getModel(req, 'PaymasterRoom');
+                const paymaster = await PaymasterRoom.findOne({
+                    _id: folio.paymasterId,
+                    property: getPropertyId(req)
+                });
+                if (paymaster) {
+                    paymaster.payments = folio.payments.map(payment => ({
+                        date: payment.date,
+                        method: payment.method,
+                        amount: payment.amount,
+                        transactionId: payment.transactionId,
+                        notes: payment.notes
+                    }));
+                    paymaster.calculateBalance();
+                    await paymaster.save();
+                }
+            } catch (paymasterError) {
+                console.error('Error updating paymaster:', paymasterError);
+            }
+        }
+        
+        res.status(200).json(folio);
+    } catch (error) {
+        console.error('Error deleting payment:', error);
+        res.status(500).json({ message: "Server error deleting payment." });
+    }
+});
+
+// Apply discount to all charges in folio
+router.put('/:id/discount', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Validate ObjectId
+        if (!isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid folio ID format' });
+        }
+        
+        // Validate discount field
+        const discountSchema = {
+            discountPercent: { type: 'number', required: true, min: 0, max: 100 }
+        };
+
+        const validation = validateAndSetDefaults(req.body, discountSchema);
+        if (!validation.isValid) {
+            return res.status(400).json({ message: validation.errors.join(', ') });
+        }
+
+        const GuestFolio = getModel(req, 'GuestFolio');
+        const folio = await GuestFolio.findOne({
+            _id: id,
+            property: getPropertyId(req),
+        });
+        if (!folio) {
+            return res.status(404).json({ message: "Folio not found." });
+        }
+        
+        const { discountPercent } = validation.validated;
+        
+        // Apply discount to all non-room charges (or all charges if needed)
+        folio.items.forEach(item => {
+            // Skip room accommodation charges
+            if (item.department === 'Room' && item.description.toLowerCase().includes('accommodation')) {
+                return;
+            }
+            
+            // Calculate discount amount
+            const discountAmount = (item.amount * discountPercent) / 100;
+            item.discount = (item.discount || 0) + discountAmount;
+            item.amount = item.amount - discountAmount;
+            
+            // Update unitPrice proportionally
+            if (item.unitPrice && item.quantity) {
+                item.unitPrice = item.amount / item.quantity;
+            }
+        });
+        
+        folio.calculateBalance();
+        await folio.save();
+        
+        // Update paymaster if applicable
+        if (folio.paymasterId) {
+            try {
+                const PaymasterRoom = getModel(req, 'PaymasterRoom');
+                const paymaster = await PaymasterRoom.findOne({
+                    _id: folio.paymasterId,
+                    property: getPropertyId(req)
+                });
+                if (paymaster) {
+                    paymaster.charges = folio.items.map(item => ({
+                        description: item.description,
+                        date: item.date,
+                        amount: item.amount,
+                        department: item.department,
+                        quantity: item.quantity,
+                        unitPrice: item.unitPrice,
+                        tax: item.tax,
+                        discount: item.discount,
+                        notes: item.notes
+                    }));
+                    paymaster.calculateBalance();
+                    await paymaster.save();
+                }
+            } catch (paymasterError) {
+                console.error('Error updating paymaster:', paymasterError);
+            }
+        }
+        
+        res.status(200).json(folio);
+    } catch (error) {
+        console.error('Error applying discount:', error);
+        res.status(500).json({ message: "Server error applying discount." });
+    }
+});
+
 module.exports = router;
 

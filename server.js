@@ -118,12 +118,6 @@ const isOriginAllowed = (origin) => {
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     
-    // Debug logging (remove in production)
-    if (origin) {
-        console.log(`[CORS] Request from origin: ${origin}, Method: ${req.method}, Path: ${req.path}`);
-        console.log(`[CORS] Origin allowed: ${isOriginAllowed(origin)}`);
-    }
-    
     // Always set CORS headers for preflight requests
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
@@ -134,9 +128,6 @@ app.use((req, res, next) => {
         // Only set Access-Control-Allow-Origin if origin is allowed
         if (origin && isOriginAllowed(origin)) {
             res.header('Access-Control-Allow-Origin', origin);
-            console.log(`[CORS] Preflight allowed for: ${origin}`);
-        } else {
-            console.log(`[CORS] Preflight rejected for: ${origin || 'no origin'}`);
         }
         return res.sendStatus(200);
     }

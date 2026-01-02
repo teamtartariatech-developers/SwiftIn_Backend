@@ -1,12 +1,24 @@
-const admin = require('firebase-admin');
-
+let admin = null;
 let firebaseApp = null;
+
+// Try to load firebase-admin, but don't fail if it's not installed
+try {
+    admin = require('firebase-admin');
+} catch (error) {
+    console.warn('firebase-admin not installed. Push notifications will be disabled.');
+    console.warn('To enable push notifications, run: npm install firebase-admin');
+}
 
 /**
  * Initialize Firebase Admin SDK
  * Should be called once at application startup
  */
 function initializeFirebase() {
+    if (!admin) {
+        console.warn('firebase-admin not installed. Push notifications will be disabled.');
+        return null;
+    }
+    
     if (firebaseApp) {
         return firebaseApp; // Already initialized
     }
@@ -39,6 +51,11 @@ function initializeFirebase() {
  * Send push notification to a single FCM token
  */
 async function sendNotification(token, title, body, data = {}) {
+    if (!admin) {
+        console.warn('firebase-admin not installed. Cannot send notification.');
+        return { success: false, error: 'firebase-admin not installed' };
+    }
+    
     if (!firebaseApp) {
         console.warn('Firebase not initialized. Cannot send notification.');
         return { success: false, error: 'Firebase not initialized' };
@@ -96,6 +113,11 @@ async function sendNotification(token, title, body, data = {}) {
  * Send push notifications to multiple FCM tokens
  */
 async function sendNotificationToMultiple(tokens, title, body, data = {}) {
+    if (!admin) {
+        console.warn('firebase-admin not installed. Cannot send notifications.');
+        return { success: false, error: 'firebase-admin not installed' };
+    }
+    
     if (!firebaseApp) {
         console.warn('Firebase not initialized. Cannot send notifications.');
         return { success: false, error: 'Firebase not initialized' };
